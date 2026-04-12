@@ -1,1 +1,51 @@
-/venv
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Environment variables
+.env
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Data (keep raw, ignore large processed)
+data/live/
+data/processed/
+!data/processed/.gitkeep
+
+# Model checkpoints
+models/*.pt
+models/*.pkl
+models/*.json
+!models/.gitkeep
+
+# Outputs (generated)
+outputs/
+!outputs/.gitkeep
+
+# Jupyter
+.ipynb_checkpoints/
+
+# uv
+uv.lock
+
+# Misc
+.pytest_cache/
+*.log
+
+plan.md
