@@ -52,32 +52,141 @@ def st_image(path: str, **kwargs):
 # ────────────────────────────────────────────────────────────────
 st.markdown("""
 <style>
+    @import url('https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@300;400;500;600;700;800&display=swap');
+    
+    html, body, [class*="css"] {
+        font-family: 'Plus Jakarta Sans', sans-serif !important;
+    }
+
+    /* Force Dark Theme regardless of Streamlit user settings */
+    [data-testid="stAppViewContainer"] {
+        background-color: #0f172a !important;
+        background-image: 
+            radial-gradient(circle at 10% 20%, rgba(59, 130, 246, 0.05) 0%, transparent 40%),
+            radial-gradient(circle at 90% 80%, rgba(16, 185, 129, 0.05) 0%, transparent 40%) !important;
+        color: #f8fafc !important;
+    }
+
+    [data-testid="stHeader"] {
+        background-color: transparent !important;
+    }
+    
+    /* Ensure all default Streamlit text is visible against the dark background */
+    .stMarkdown p, .stMarkdown h1, .stMarkdown h2, .stMarkdown h3, .stMarkdown h4, .stMarkdown li, .stText {
+        color: #e2e8f0 !important;
+    }
+
     .main-header {
-        font-size: 2.5rem;
-        font-weight: 700;
-        background: linear-gradient(120deg, #1a5276, #2980b9, #48c9b0);
+        font-size: 3.5rem;
+        font-weight: 800;
+        background: linear-gradient(135deg, #00C6FF 0%, #0072FF 100%);
         -webkit-background-clip: text;
         -webkit-text-fill-color: transparent;
-        margin-bottom: 0.5rem;
+        margin-bottom: 0.2rem;
+        letter-spacing: -1.5px;
+        line-height: 1.2;
     }
     .sub-header {
-        font-size: 1.1rem;
-        color: #7f8c8d;
-        margin-bottom: 2rem;
+        font-size: 1.15rem;
+        color: #94a3b8;
+        margin-bottom: 3rem;
+        font-weight: 400;
+        letter-spacing: 0.2px;
     }
+    
+    /* Modern Premium Metric Cards */
     .metric-card {
-        background: linear-gradient(135deg, #f8f9fa, #e9ecef);
-        border-radius: 12px;
-        padding: 1.2rem;
-        border-left: 4px solid;
-        margin-bottom: 0.8rem;
+        background: linear-gradient(145deg, #1e293b, #0f172a);
+        border: 1px solid rgba(255, 255, 255, 0.1);
+        border-radius: 20px;
+        padding: 1.8rem;
+        margin-bottom: 1.5rem;
+        transition: all 0.4s ease;
+        color: #f8fafc !important;
+        box-shadow: 0 10px 25px -5px rgba(0, 0, 0, 0.5), 0 8px 10px -6px rgba(0, 0, 0, 0.3);
+        position: relative;
+        overflow: hidden;
     }
+    
+    .metric-card:hover {
+        transform: translateY(-5px);
+        box-shadow: 0 25px 50px -12px rgba(0,0,0,0.7);
+        border-color: rgba(255, 255, 255, 0.25);
+        background: linear-gradient(145deg, #24334a, #111a30);
+    }
+    
+    /* Floating gradient glow effect */
+    .metric-card::before {
+        content: "";
+        position: absolute;
+        top: 0; left: 0; right: 0;
+        height: 4px;
+        background: var(--card-glow, linear-gradient(90deg, #3b82f6, #8b5cf6));
+        opacity: 0.9;
+    }
+    
     .stTabs [data-baseweb="tab-list"] {
-        gap: 8px;
+        gap: 2rem;
+        background-color: transparent;
     }
     .stTabs [data-baseweb="tab"] {
-        padding: 10px 20px;
-        border-radius: 8px 8px 0 0;
+        padding: 0.8rem 1rem;
+        font-size: 1.05rem;
+        font-weight: 500;
+        color: #64748b;
+        transition: color 0.2s ease;
+    }
+    .stTabs [data-baseweb="tab"]:hover {
+        color: #f8fafc;
+    }
+    .stTabs [aria-selected="true"] {
+        color: #00f2fe !important;
+        border-bottom-color: #00f2fe !important;
+    }
+    
+    /* Sleeker Sidebar styling overrides */
+    [data-testid="stSidebar"] {
+        background-color: #0b1120 !important;
+        border-right: 1px solid rgba(255, 255, 255, 0.05);
+    }
+    [data-testid="stSidebar"] * {
+        color: #e2e8f0;
+    }
+    
+    hr {
+        border-color: rgba(255,255,255,0.05);
+        margin: 2rem 0;
+    }
+    
+    .stat-label {
+        color: #94a3b8; 
+        font-size: 0.85rem; 
+        font-weight: 600; 
+        text-transform: uppercase; 
+        letter-spacing: 0.5px;
+        margin-bottom: 0.4rem;
+    }
+    .stat-value {
+        font-size: 2.2rem; 
+        font-weight: 800; 
+        line-height: 1.1;
+        margin-bottom: 0.4rem;
+    }
+    .stat-category {
+        font-size: 0.85rem; 
+        font-weight: 700;
+        padding: 0.25rem 0.6rem;
+        border-radius: 6px;
+        display: inline-block;
+        letter-spacing: 0.3px;
+    }
+    .meta-data {
+        margin-top: 1.5rem; 
+        color: #64748b; 
+        font-size: 0.85rem;
+        display: flex;
+        gap: 1.2rem;
+        font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
     }
 </style>
 """, unsafe_allow_html=True)
@@ -239,28 +348,28 @@ with tab1:
                 cat_pred, color_pred, emoji_pred = pm25_category(pred_val)
 
                 st.markdown(f"""
-                <div class="metric-card" style="border-left-color: {color_curr};">
-                    <h3 style="margin:0 0 0.5rem 0;color:{color_curr};">{emoji_curr} {city}</h3>
-                    <div style="display:flex; justify-content:space-between;">
+                <div class="metric-card" style="--card-glow: linear-gradient(90deg, {color_curr}, {color_pred});">
+                    <h3 style="margin:0 0 1.2rem 0; font-size: 1.4rem; font-weight: 800; color: #f8fafc; display: flex; align-items: center; gap: 0.5rem; letter-spacing: -0.5px;">
+                        <span style="font-size: 1.6rem; filter: drop-shadow(0 2px 4px rgba(0,0,0,0.2));">{emoji_curr}</span> {city}
+                    </h3>
+                    
+                    <div style="display:grid; grid-template-columns: 1fr 1fr; gap: 1rem;">
                         <div>
-                            <div style="color:#7f8c8d; font-size:0.8rem;">Current PM2.5</div>
-                            <div style="font-size:1.8rem; font-weight:700; color:{color_curr};">
-                                {current_pm or 'N/A'}
-                            </div>
-                            <div style="font-size:0.85rem; color:{color_curr};">{cat_curr}</div>
+                            <div class="stat-label">Current PM2.5</div>
+                            <div class="stat-value" style="color: {color_curr}; text-shadow: 0 0 20px {color_curr}40;">{current_pm or 'N/A'}</div>
+                            <div class="stat-category" style="background-color: {color_curr}1A; color: {color_curr}; border: 1px solid {color_curr}4D;">{cat_curr}</div>
                         </div>
                         <div>
-                            <div style="color:#7f8c8d; font-size:0.8rem;">Tomorrow PM2.5</div>
-                            <div style="font-size:1.8rem; font-weight:700; color:{color_pred};">
-                                {pred_val or 'N/A'}
-                            </div>
-                            <div style="font-size:0.85rem; color:{color_pred};">{cat_pred}</div>
+                            <div class="stat-label">Tomorrow's Forecast</div>
+                            <div class="stat-value" style="color: {color_pred}; text-shadow: 0 0 20px {color_pred}40;">{pred_val or 'N/A'}</div>
+                            <div class="stat-category" style="background-color: {color_pred}1A; color: {color_pred}; border: 1px solid {color_pred}4D;">{cat_pred}</div>
                         </div>
                     </div>
-                    <div style="margin-top:0.5rem; color:#7f8c8d; font-size:0.75rem;">
-                        AQI: {current_aqi or 'N/A'} | 
-                        Temp: {reading.get('temperature', 'N/A')}°C | 
-                        Wind: {reading.get('wind_speed', 'N/A')} m/s
+                    
+                    <div class="meta-data">
+                        <span title="Air Quality Index">AQI: <strong style="color:#e2e8f0">{current_aqi or 'N/A'}</strong></span>
+                        <span>Temp: <strong style="color:#e2e8f0">{reading.get('temperature', 'N/A')}°C</strong></span>
+                        <span>Wind: <strong style="color:#e2e8f0">{reading.get('wind_speed', 'N/A')} m/s</strong></span>
                     </div>
                 </div>
                 """, unsafe_allow_html=True)

@@ -34,9 +34,7 @@ models/*.pkl
 models/*.json
 !models/.gitkeep
 
-# Outputs (generated)
-outputs/
-!outputs/.gitkeep
+
 
 # Jupyter
 .ipynb_checkpoints/
