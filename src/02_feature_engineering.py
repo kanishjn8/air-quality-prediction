@@ -1,352 +1,270 @@
-"""
-Step 02 — Feature Engineering
-Input:  data/raw/merged.csv
-Output: data/processed/features.parquet, models/feature_scaler.pkl
+"""Step 02 — Feature engineering (Plan vNext: XGBoost + cross-city features)
 
-Performs: data cleaning, missingness diagnosis, imputation, temporal/calendar
-feature engineering, target creation, time-based splitting, and feature scaling.
+Input:
+  - data/raw/merged.csv
+
+Output:
+  - data/processed/features.parquet
+  - models/feature_scaler.pkl
+  - models/feature_columns.json
+
+Contract:
+  - target_pm2_5 is next-day PM2.5: pm2_5 shifted by -1 per city.
+  - The feature scaler is fit ONLY on train split, then applied to val/test.
+  - Cross-city dependencies are encoded explicitly via neighbor_* lag features.
 """
 
-import os
-import sys
-import random
-import warnings
+from __future__ import annotations
+
 import json
+import os
+from math import atan2, cos, radians, sin, sqrt
 
+import joblib
 import numpy as np
 import pandas as pd
-from scipy import stats
 from sklearn.impute import KNNImputer
 from sklearn.preprocessing import StandardScaler
-import joblib
 
-# ────────────────────────────────────────────────────────────────
-# Reproducibility
-# ────────────────────────────────────────────────────────────────
 SEED = 42
-random.seed(SEED)
 np.random.seed(SEED)
 
-warnings.filterwarnings("ignore", category=FutureWarning)
-
-# ────────────────────────────────────────────────────────────────
-# Paths (run from project root)
-# ────────────────────────────────────────────────────────────────
-RAW_CSV     = "data/raw/merged.csv"
+RAW_CSV = "data/raw/merged.csv"
 OUT_PARQUET = "data/processed/features.parquet"
 SCALER_PATH = "models/feature_scaler.pkl"
 FEATURE_COLS_PATH = "models/feature_columns.json"
 
-os.makedirs("data/processed", exist_ok=True)
-os.makedirs("models", exist_ok=True)
 
+# NOTE: Keep this list in sync with plan.md.
+CITIES = ["Delhi", "Mumbai", "Bengaluru", "Kolkata", "Hyderabad"]
+CITY_TO_IDX = {c: i for i, c in enumerate(CITIES)}
 
-# ═══════════════════════════════════════════════════════════════
-# 2.1  Load and Parse
-# ═══════════════════════════════════════════════════════════════
-print("=" * 60)
-print("Step 02 — Feature Engineering")
-print("=" * 60)
-
-df = pd.read_csv(RAW_CSV, index_col=0)
-df["date"] = pd.to_datetime(df["date"], infer_datetime_format=True)
-
-# Normalize city names (handle 'Bangalore' → 'Bengaluru' if present)
-df["city"] = df["city"].replace({"Bangalore": "Bengaluru", "bangalore": "Bengaluru"})
-
-# Capitalize city names for consistency
-df["city"] = df["city"].str.strip().str.title()
-
-df = df.sort_values(["city", "date"]).reset_index(drop=True)
-print(f"\n✓ Loaded {len(df)} rows, {df['city'].nunique()} cities: {df['city'].unique().tolist()}")
-print(f"  Date range: {df['date'].min()} → {df['date'].max()}")
-
-# Option: temporarily drop a city from the pipeline
-# (keeps the rest of the code consistent when a city's live feed is unstable)
-EXCLUDE_CITIES = {"Mumbai"}
-if EXCLUDE_CITIES:
-    before = len(df)
-    df = df[~df["city"].isin(EXCLUDE_CITIES)].copy()
-    df = df.sort_values(["city", "date"]).reset_index(drop=True)
-    print(f"\n  ✓ Excluded cities: {sorted(EXCLUDE_CITIES)}")
-    print(f"    Rows removed: {before - len(df)}")
-    print(f"    Remaining cities: {sorted(df['city'].unique().tolist())}")
-
-
-# ═══════════════════════════════════════════════════════════════
-# 2.2  Missing Data Diagnosis
-# ═══════════════════════════════════════════════════════════════
-NUMERIC_COLS = [
-    "aqi", "co", "no", "no2", "o3", "so2",
-    "pm2_5", "pm10", "nh3",
-    "temperature", "wind_speed", "rainfall", "pressure",
-]
-
-print("\n" + "─" * 60)
-print("Missingness Report")
-print("─" * 60)
-
-# Treat pm2_5 < 1.0 as missing (sensor failure)
-df.loc[df["pm2_5"] < 1.0, "pm2_5"] = np.nan
-
-missingness_report = []
-for city in sorted(df["city"].unique()):
-    city_df = df[df["city"] == city]
-    for col in NUMERIC_COLS:
-        n_total = len(city_df)
-        n_miss = city_df[col].isna().sum()
-        rate = n_miss / n_total * 100
-
-        # Simple MCAR approximation: compare mean of present rows vs overall
-        # If data is MNAR, missingness correlates with high pollution
-        if n_miss > 0 and n_miss < n_total:
-            present = city_df[col].dropna()
-            # Check if missingness in this column correlates with pm2_5 being high
-            miss_mask = city_df[col].isna().astype(int)
-            pm25_avail = city_df["pm2_5"].notna()
-            if pm25_avail.sum() > 10 and miss_mask.sum() > 2:
-                try:
-                    corr, pval = stats.pointbiserialr(
-                        miss_mask[pm25_avail], city_df.loc[pm25_avail.index[pm25_avail], "pm2_5"]
-                    )
-                    mechanism = "MNAR" if pval < 0.05 and abs(corr) > 0.1 else "MCAR"
-                except Exception:
-                    mechanism = "MCAR"
-            else:
-                mechanism = "MCAR"
-        else:
-            mechanism = "—"
-
-        flag = " ⚠ HIGH" if rate > 30 else ""
-        missingness_report.append({
-            "city": city, "column": col,
-            "missing": n_miss, "rate_pct": round(rate, 1),
-            "mechanism": mechanism, "flag": flag,
-        })
-
-report_df = pd.DataFrame(missingness_report)
-for city in sorted(df["city"].unique()):
-    subset = report_df[report_df["city"] == city]
-    if subset["missing"].sum() == 0:
-        print(f"  {city}: no missing values")
-    else:
-        print(f"\n  {city}:")
-        for _, r in subset[subset["missing"] > 0].iterrows():
-            print(f"    {r['column']:>14s}: {r['rate_pct']:5.1f}% missing  "
-                  f"({r['mechanism']}){r['flag']}")
-
-
-# ═══════════════════════════════════════════════════════════════
-# 2.3  Imputation
-# ═══════════════════════════════════════════════════════════════
-print("\n" + "─" * 60)
-print("Imputing missing values …")
-print("─" * 60)
-
-# Separate MNAR and MCAR columns per city
-mnar_cols_by_city = {}
-for city in df["city"].unique():
-    mnar_cols = report_df[
-        (report_df["city"] == city) & (report_df["mechanism"] == "MNAR")
-    ]["column"].tolist()
-    mnar_cols_by_city[city] = mnar_cols
-
-# Apply imputation per city
-for city in df["city"].unique():
-    mask = df["city"] == city
-    city_idx = df[mask].index
-
-    mnar_cols = mnar_cols_by_city.get(city, [])
-
-    # MNAR columns: forward-fill → backward-fill → city median
-    for col in mnar_cols:
-        if col in NUMERIC_COLS:
-            df.loc[city_idx, col] = (
-                df.loc[city_idx, col]
-                .ffill()
-                .bfill()
-                .fillna(df.loc[city_idx, col].median())
-            )
-
-    # MCAR columns: KNN imputation (k=5) within city
-    mcar_cols = [c for c in NUMERIC_COLS if c not in mnar_cols and df.loc[city_idx, c].isna().any()]
-    if mcar_cols:
-        imputer = KNNImputer(n_neighbors=5)
-        df.loc[city_idx, mcar_cols] = imputer.fit_transform(df.loc[city_idx, mcar_cols])
-
-# Fill any remaining NaN in numeric cols with global median
-for col in NUMERIC_COLS:
-    if df[col].isna().any():
-        df[col] = df[col].fillna(df[col].median())
-
-remaining = df[NUMERIC_COLS].isna().sum().sum()
-print(f"  ✓ Imputation complete — remaining NaN in features: {remaining}")
-
-
-# ═══════════════════════════════════════════════════════════════
-# 2.4  Temporal Feature Engineering
-# ═══════════════════════════════════════════════════════════════
-print("\n" + "─" * 60)
-print("Creating temporal features …")
-print("─" * 60)
-
-for lag in [1, 2, 3, 7]:
-    df[f"pm2_5_lag{lag}"] = df.groupby("city")["pm2_5"].shift(lag)
-    df[f"aqi_lag{lag}"]   = df.groupby("city")["aqi"].shift(lag)
-
-for window in [3, 7]:
-    df[f"pm2_5_roll{window}mean"] = df.groupby("city")["pm2_5"].transform(
-        lambda x: x.shift(1).rolling(window).mean()
-    )
-    df[f"pm2_5_roll{window}std"] = df.groupby("city")["pm2_5"].transform(
-        lambda x: x.shift(1).rolling(window).std()
-    )
-
-print("  ✓ Lag features: pm2_5_lag{1,2,3,7}, aqi_lag{1,2,3,7}")
-print("  ✓ Rolling features: pm2_5_roll{3,7}{mean,std}")
-
-
-# ═══════════════════════════════════════════════════════════════
-# 2.5  Calendar Features
-# ═══════════════════════════════════════════════════════════════
-print("\n" + "─" * 60)
-print("Creating calendar features …")
-print("─" * 60)
-
-df["dayofweek"]  = df["date"].dt.dayofweek          # 0=Monday
-df["month"]      = df["date"].dt.month
-df["is_weekend"] = (df["dayofweek"] >= 5).astype(int)
-df["quarter"]    = df["date"].dt.quarter
-
-# Indian festival / harvest season proxy
-df["crop_burning_season"] = df["month"].isin([10, 11]).astype(int)
-df["monsoon_season"]      = df["month"].isin([6, 7, 8, 9]).astype(int)
-
-print("  ✓ dayofweek, month, is_weekend, quarter, crop_burning_season, monsoon_season")
-
-
-# ═══════════════════════════════════════════════════════════════
-# 2.6  City Encoding
-# ═══════════════════════════════════════════════════════════════
-CITY_TO_IDX = {
-    "Delhi": 0, "Bengaluru": 1, "Kolkata": 2, "Hyderabad": 3,
+CITY_COORDS: dict[str, tuple[float, float]] = {
+    "Delhi": (28.6139, 77.2090),
+    "Mumbai": (19.0760, 72.8777),
+    "Bengaluru": (12.9716, 77.5946),
+    "Kolkata": (22.5726, 88.3639),
+    "Hyderabad": (17.3850, 78.4867),
 }
-df["city_idx"] = df["city"].map(CITY_TO_IDX)
-
-# Verify no unmapped cities
-unmapped = df["city_idx"].isna().sum()
-if unmapped > 0:
-    print(f"  ⚠ {unmapped} rows have unmapped city names!")
-    print(f"    Unique cities: {df['city'].unique().tolist()}")
-    sys.exit(1)
-df["city_idx"] = df["city_idx"].astype(int)
-print(f"\n  ✓ City encoding: {CITY_TO_IDX}")
 
 
-# ═══════════════════════════════════════════════════════════════
-# 2.7  Target Creation
-# ═══════════════════════════════════════════════════════════════
-print("\n" + "─" * 60)
-print("Creating target (next-day PM2.5) …")
-print("─" * 60)
-
-df["target_pm2_5"] = df.groupby("city")["pm2_5"].shift(-1)
-
-before = len(df)
-df = df.dropna(subset=["target_pm2_5"])
-after = len(df)
-print(f"  ✓ Dropped {before - after} rows with no next-day label")
-print(f"  ✓ Remaining rows: {after}")
+def haversine_km(c1: tuple[float, float], c2: tuple[float, float]) -> float:
+    r = 6371.0
+    lat1, lon1 = map(radians, c1)
+    lat2, lon2 = map(radians, c2)
+    dlat, dlon = lat2 - lat1, lon2 - lon1
+    a = sin(dlat / 2) ** 2 + cos(lat1) * cos(lat2) * sin(dlon / 2) ** 2
+    return r * 2 * atan2(sqrt(a), sqrt(1 - a))
 
 
-# ═══════════════════════════════════════════════════════════════
-# 2.8  Train / Val / Test Split (time-based)
-# ═══════════════════════════════════════════════════════════════
-print("\n" + "─" * 60)
-print("Time-based train/val/test split …")
-print("─" * 60)
-
-df["split"] = "train"
-df.loc[df["date"] >= "2022-10-01", "split"] = "val"
-df.loc[df["date"] >= "2023-02-01", "split"] = "test"
-
-for s in ["train", "val", "test"]:
-    n = (df["split"] == s).sum()
-    if n > 0:
-        date_range = f"{df.loc[df['split']==s, 'date'].min().date()} → {df.loc[df['split']==s, 'date'].max().date()}"
-    else:
-        date_range = "N/A"
-    print(f"  {s:>5s}: {n:>5d} rows  ({date_range})")
+def _ensure_dirs() -> None:
+    os.makedirs("data/processed", exist_ok=True)
+    os.makedirs("models", exist_ok=True)
 
 
-# ═══════════════════════════════════════════════════════════════
-# 2.9  Feature Scaling (fit on train only)
-# ═══════════════════════════════════════════════════════════════
-print("\n" + "─" * 60)
-print("Scaling features …")
-print("─" * 60)
+def main() -> None:
+    _ensure_dirs()
 
-FEATURE_COLS = [
-    "city_idx",
-    # NOTE: pm2_5 and aqi at t=0 are EXCLUDED to prevent data leakage.
-    # target_pm2_5 = pm2_5.shift(-1), so including pm2_5(t) leaks the target.
-    # aqi(t) is also strongly correlated with pm2_5(t) and thus leaks.
-    # Use only lagged versions (pm2_5_lag1, aqi_lag1, etc.).
-    "co", "no", "no2", "o3", "so2",
-    "pm10", "nh3",
-    "temperature", "wind_speed", "rainfall", "pressure",
-    "pm2_5_lag1", "pm2_5_lag2", "pm2_5_lag3", "pm2_5_lag7",
-    "aqi_lag1", "aqi_lag2", "aqi_lag3", "aqi_lag7",
-    "pm2_5_roll3mean", "pm2_5_roll7mean",
-    "pm2_5_roll3std", "pm2_5_roll7std",
-    "dayofweek", "month", "is_weekend", "quarter",
-    "crop_burning_season", "monsoon_season",
-]
+    print("=" * 60)
+    print("Step 02 — Feature Engineering (XGBoost + cross-city)")
+    print("=" * 60)
 
-# Drop rows with NaN in feature cols (from lag features at start of each city)
-before = len(df)
-df = df.dropna(subset=FEATURE_COLS)
-after = len(df)
-print(f"  Dropped {before - after} rows with NaN in feature columns (lag warmup)")
+    df = pd.read_csv(RAW_CSV)
+    if "date" not in df.columns or "city" not in df.columns:
+        raise ValueError("merged.csv must include 'date' and 'city' columns")
+    df["date"] = pd.to_datetime(df["date"], errors="coerce")
+    df = df.dropna(subset=["date"]).copy()
 
-# Fit scaler on train split only
-train_mask = df["split"] == "train"
-scaler = StandardScaler()
-scaler.fit(df.loc[train_mask, FEATURE_COLS])
+    # Normalize city names (handle Bangalore alias)
+    df["city"] = (
+        df["city"]
+        .astype(str)
+        .str.strip()
+        .replace({"Bangalore": "Bengaluru", "bangalore": "Bengaluru"})
+        .str.title()
+    )
 
-# Transform all splits — store scaled values alongside originals
-scaled_cols = [f"{c}_scaled" for c in FEATURE_COLS]
-df[scaled_cols] = scaler.transform(df[FEATURE_COLS])
+    df = df[df["city"].isin(CITIES)].copy()
+    df = df.sort_values(["city", "date"]).reset_index(drop=True)
+    if df.empty:
+        raise ValueError("No rows left after filtering to configured CITIES")
 
-joblib.dump(scaler, SCALER_PATH)
-print(f"  ✓ Scaler fitted on {train_mask.sum()} train rows, saved to {SCALER_PATH}")
+    print(f"\n✓ Loaded {len(df)} rows across {df['city'].nunique()} cities")
+    print(f"  Date range: {df['date'].min().date()} → {df['date'].max().date()}")
 
-# Also scale pm2_5 and aqi for the LSTM temporal branch.
-# These columns are NOT in FEATURE_COLS (to prevent leakage in the main branch),
-# but the temporal sequence still needs their scaled values.
-TEMPORAL_EXTRA_COLS = ["pm2_5", "aqi"]
-temporal_scaler = StandardScaler()
-temporal_scaler.fit(df.loc[train_mask, TEMPORAL_EXTRA_COLS])
-for c in TEMPORAL_EXTRA_COLS:
-    idx = TEMPORAL_EXTRA_COLS.index(c)
-    df[f"{c}_scaled"] = (df[c] - temporal_scaler.mean_[idx]) / temporal_scaler.scale_[idx]
+    # Basic sensor failure rule
+    df.loc[df["pm2_5"] < 1.0, "pm2_5"] = np.nan
 
-TEMPORAL_SCALER_PATH = "models/temporal_scaler.pkl"
-joblib.dump(temporal_scaler, TEMPORAL_SCALER_PATH)
-print(f"  ✓ Temporal scaler (pm2_5, aqi) saved to {TEMPORAL_SCALER_PATH}")
+    numeric_cols = [
+        "aqi",
+        "co",
+        "no2",
+        "o3",
+        "so2",
+        "pm2_5",
+        "pm10",
+        "temperature",
+        "wind_speed",
+        "rainfall",
+        "pressure",
+    ]
+    missing = [c for c in numeric_cols if c not in df.columns]
+    if missing:
+        raise ValueError(f"merged.csv is missing required columns: {missing}")
 
-# Save feature column order for inference reproducibility
-with open(FEATURE_COLS_PATH, "w") as f:
-    json.dump(FEATURE_COLS, f, indent=2)
-print(f"  ✓ Feature column order saved to {FEATURE_COLS_PATH}")
+    # KNN imputation per city
+    imputed_parts: list[pd.DataFrame] = []
+    for _, grp in df.groupby("city", sort=True):
+        grp = grp.copy().sort_values("date")
+        imp = KNNImputer(n_neighbors=5)
+        grp[numeric_cols] = imp.fit_transform(grp[numeric_cols])
+        imputed_parts.append(grp)
+    df = pd.concat(imputed_parts, ignore_index=True).sort_values(["city", "date"]).reset_index(
+        drop=True
+    )
+
+    # Temporal lag/rolling features (per city)
+    for lag in [1, 2, 3, 7]:
+        df[f"pm2_5_lag{lag}"] = df.groupby("city")["pm2_5"].shift(lag)
+        df[f"aqi_lag{lag}"] = df.groupby("city")["aqi"].shift(lag)
+
+    for window in [3, 7]:
+        df[f"pm2_5_roll{window}mean"] = df.groupby("city")["pm2_5"].transform(
+            lambda x: x.shift(1).rolling(window, min_periods=1).mean()
+        )
+        df[f"pm2_5_roll{window}std"] = df.groupby("city")["pm2_5"].transform(
+            lambda x: x.shift(1).rolling(window, min_periods=1).std().fillna(0.0)
+        )
+
+    # Calendar features
+    df["dayofweek"] = df["date"].dt.dayofweek
+    df["month"] = df["date"].dt.month
+    df["is_weekend"] = (df["dayofweek"] >= 5).astype(int)
+    df["quarter"] = df["date"].dt.quarter
+    df["crop_burning_season"] = df["month"].isin([10, 11]).astype(int)
+    df["monsoon_season"] = df["month"].isin([6, 7, 8, 9]).astype(int)
+
+    # Neighbor weights based on distance
+    dist_weights: dict[tuple[str, str], float] = {}
+    for c1 in CITIES:
+        for c2 in CITIES:
+            if c1 == c2:
+                continue
+            dist = haversine_km(CITY_COORDS[c1], CITY_COORDS[c2])
+            dist_weights[(c1, c2)] = float(np.exp(-dist / 500.0))
+
+    # Prepare per-date lookup for neighbors (date-aligned mapping)
+    pivot_pm = df.pivot_table(index="date", columns="city", values="pm2_5", aggfunc="first").sort_index()
+    pivot_wind = (
+        df.pivot_table(index="date", columns="city", values="wind_speed", aggfunc="first")
+        .sort_index()
+    )
+    pivot_pm_lag1 = pivot_pm.shift(1)
+    pivot_wind_lag1 = pivot_wind.shift(1)
+
+    for target_city in CITIES:
+        mask = df["city"] == target_city
+        dates = df.loc[mask, "date"]
+        for neighbor in CITIES:
+            if neighbor == target_city:
+                continue
+            w = dist_weights[(target_city, neighbor)]
+            key = neighbor.lower()
+
+            pm_map = pivot_pm_lag1[neighbor]
+            wind_map = pivot_wind_lag1[neighbor]
+
+            df.loc[mask, f"neighbor_{key}_pm2_5_lag1"] = dates.map(pm_map).to_numpy() * w
+            df.loc[mask, f"neighbor_{key}_wind_lag1"] = dates.map(wind_map).to_numpy() * w
+
+    # Encode city + label
+    df["city_idx"] = df["city"].map(CITY_TO_IDX).astype(int)
+    df["target_pm2_5"] = df.groupby("city")["pm2_5"].shift(-1)
+    df = df.dropna(subset=["target_pm2_5"]).reset_index(drop=True)
+
+    # Time split (robust to this repo's historical data range)
+    # Use quantiles so we always have non-empty train/val/test.
+    q_val = df["date"].quantile(0.80)
+    q_test = df["date"].quantile(0.90)
+    df["split"] = "train"
+    df.loc[df["date"] >= q_val, "split"] = "val"
+    df.loc[df["date"] >= q_test, "split"] = "test"
+    print("\nSplit counts:")
+    print(df["split"].value_counts().to_string())
+
+    neighbor_cols = sorted([c for c in df.columns if c.startswith("neighbor_")])
+    # Neighbor features can be missing when a neighbor city doesn't have a reading for that date.
+    # Missing neighbor contribution should behave like 0 influence.
+    if neighbor_cols:
+        df[neighbor_cols] = df[neighbor_cols].fillna(0.0)
+
+    core_feature_columns = [
+        "aqi",
+        "co",
+        "no2",
+        "o3",
+        "so2",
+        "pm2_5",
+        "pm10",
+        "temperature",
+        "wind_speed",
+        "rainfall",
+        "pressure",
+        "pm2_5_lag1",
+        "pm2_5_lag2",
+        "pm2_5_lag3",
+        "pm2_5_lag7",
+        "aqi_lag1",
+        "aqi_lag2",
+        "aqi_lag3",
+        "aqi_lag7",
+        "pm2_5_roll3mean",
+        "pm2_5_roll7mean",
+        "pm2_5_roll3std",
+        "pm2_5_roll7std",
+        "dayofweek",
+        "month",
+        "is_weekend",
+        "quarter",
+        "crop_burning_season",
+        "monsoon_season",
+        "city_idx",
+    ]
+
+    feature_columns = core_feature_columns + neighbor_cols
+
+    before = len(df)
+    # Warmup NaNs only come from in-city lag features; neighbor columns are already filled with 0.
+    df = df.dropna(subset=core_feature_columns).reset_index(drop=True)
+    dropped = before - len(df)
+    print(f"\nDropped {dropped} warmup rows")
+    if df.empty:
+        raise ValueError(
+            "All rows were dropped after lag/neighbor feature creation; check date alignment and input coverage."
+        )
+
+    # Scale on train only
+    train_mask = df["split"] == "train"
+    # Scale into new float columns to avoid dtype-mismatch warnings when overwriting ints.
+    scaler = StandardScaler()
+    scaler.fit(df.loc[train_mask, feature_columns].astype(float))
+
+    scaled_cols = [f"{c}_scaled" for c in feature_columns]
+    df[scaled_cols] = np.nan
+    for split in ["train", "val", "test"]:
+        m = df["split"] == split
+        df.loc[m, scaled_cols] = scaler.transform(df.loc[m, feature_columns].astype(float))
+
+    joblib.dump(scaler, SCALER_PATH)
+    with open(FEATURE_COLS_PATH, "w") as f:
+        json.dump(feature_columns, f, indent=2)
+
+    df.to_parquet(OUT_PARQUET, index=False)
+    print("\nSaved:")
+    print(f"  - {OUT_PARQUET} (rows={len(df)})")
+    print(f"  - {SCALER_PATH}")
+    print(f"  - {FEATURE_COLS_PATH}")
 
 
-# ═══════════════════════════════════════════════════════════════
-# 2.10  Save
-# ═══════════════════════════════════════════════════════════════
-df.to_parquet(OUT_PARQUET, index=False)
-print(f"\n{'=' * 60}")
-print(f"✓ Features saved to {OUT_PARQUET}")
-print(f"  Shape: {df.shape}")
-print(f"  Columns: {df.columns.tolist()}")
-print(f"{'=' * 60}")
+if __name__ == "__main__":
+    main()

@@ -1,9 +1,9 @@
 # 🌫️ AirMind — Spatiotemporal PM2.5 Forecasting
 
-**Next-day PM2.5 prediction for Indian cities using a Graph Neural Network + LSTM + MLP fusion model with full XAI interpretability.**
+**Next-day PM2.5 prediction for Indian cities using an XGBoost model with explicit cross-city neighbor features and SHAP-based interpretability.**
 
 > Research gaps addressed:
-> 1. Cross-city pollutant dependency (modelled via graph edges)
+> 1. Cross-city pollutant dependency (encoded as explicit neighbor features)
 > 2. Missing data bias from structured sensor failure (MCAR vs MNAR handling)
 
 ---
@@ -17,7 +17,7 @@
 | Kolkata | 22.5726°N, 88.3639°E |
 | Hyderabad | 17.3850°N, 78.4867°E |
 
-> Note: Mumbai is currently excluded from the pipeline due to unstable live feed / data quality.
+> Note: The historical dataset includes 5 cities; live API reliability may vary per city.
 
 ---
 
@@ -30,24 +30,21 @@ airmind/
 │   │   └── merged.csv                  # historical air quality data (DO NOT modify)
 │   ├── processed/
 │   │   ├── features.parquet            # output of 02_feature_engineering.py
-│   │   ├── graph_edges.csv             # output of 03_graph_construction.py
-│   │   └── adj_matrix.npy             # adjacency matrix for GNN
+│   │   └── (no graph artifacts in plan-vNext)
 │   └── live/
-│       ├── latest_reading.json         # written by 06_live_ingest.py
-│       └── live_history.json           # rolling 7-day buffer built from live ingests (used for lag features)
+│       ├── latest_reading.json         # written by 05_live_ingest.py
+│       └── predictions.json            # written by 06_predict_live.py
 ├── src/
 │   ├── 02_feature_engineering.py       # data cleaning, imputation, feature creation
-│   ├── 03_graph_construction.py        # spatial + correlation graph
-│   ├── 04_train.py                     # model training + RF baseline
-│   ├── 05_explain.py                   # SHAP, GNN edges, temporal attribution
-│   ├── 06_live_ingest.py               # WAQI API data fetching
-│   └── 07_predict_live.py              # live inference
+│   ├── 03_train.py                     # XGBoost training
+│   ├── 04_explain.py                   # SHAP explainability (XGBoost)
+│   ├── 05_live_ingest.py               # WAQI API data fetching
+│   └── 06_predict_live.py              # live inference
 ├── models/
-│   ├── best_model.pt                   # trained GNN+LSTM model
+│   ├── best_model.pkl                  # trained XGBoost model
 │   ├── feature_scaler.pkl              # StandardScaler (fitted on train)
 │   ├── feature_columns.json            # ordered feature schema saved by 02_feature_engineering.py
-│   ├── city_last7.json                 # last-7 per-city raw rows saved by 04_train.py (fallback)
-│   └── baseline_rf.pkl                 # Random Forest baseline
+│   └── city_last7.json                 # last-7 per-city raw rows saved by 03_train.py (inference)
 ├── outputs/
 │   ├── shap_summary.png                # SHAP feature importance
 │   ├── gnn_edge_importance.png         # cross-city influence heatmap
@@ -68,6 +65,26 @@ airmind/
 ```
 
 ---
+
+## ⚠️ Deprecated legacy scripts
+
+The canonical runnable pipeline is:
+
+- `src/02_feature_engineering.py`
+- `src/03_train.py`
+- `src/04_explain.py`
+- `src/05_live_ingest.py`
+- `src/06_predict_live.py`
+
+Older torch-era scripts still exist only as **deprecated stubs** (they exit immediately if run):
+
+- `src/03_graph_construction.py`
+- `src/04_train.py`
+- `src/05_explain.py`
+- `src/06_live_ingest.py`
+- `src/07_predict_live.py`
+
+Archived historical versions live in `legacy/src_torch/`.
 
 ## 🚀 Quick Start
 
@@ -114,20 +131,17 @@ Each step reads the previous step's output. **Run them sequentially:**
 # Step 1: Feature Engineering (clean data, impute, create features)
 uv run python src/02_feature_engineering.py
 
-# Step 2: Graph Construction (build spatial + correlation graph)
-uv run python src/03_graph_construction.py
+# Step 2: Model Training (train XGBoost)
+uv run python src/03_train.py
 
-# Step 3: Model Training (train GNN+LSTM model + RF baseline)
-uv run python src/04_train.py
+# Step 3: Explainability (generate SHAP plots)
+uv run python src/04_explain.py
 
-# Step 4: Explainability (generate SHAP plots, heatmaps)
-uv run python src/05_explain.py
+# Step 4: Live Data Ingestion (fetch current readings from WAQI API)
+uv run python src/05_live_ingest.py
 
-# Step 5: Live Data Ingestion (fetch current readings from WAQI API)
-uv run python src/06_live_ingest.py
-
-# Step 6: Live Prediction (predict tomorrow's PM2.5)
-uv run python src/07_predict_live.py
+# Step 5: Live Prediction (predict tomorrow's PM2.5)
+uv run python src/06_predict_live.py
 ```
 
 ### 4. Launch the Dashboard
@@ -146,24 +160,13 @@ The dashboard will open at **http://localhost:8501** with 4 tabs:
 
 ## 🧠 Model Architecture
 
-```
-GNN Branch (GraphSAGE-style, 2 layers)
-    ↓ city embedding [4 × 64]
-    
-Temporal Branch (LSTM, 2 layers, hidden=128)
-    ↓ sequence embedding [batch × 128]
-    
-Met Branch (MLP, 2 layers)
-    ↓ met embedding [batch × 32]
-    
-→ Concatenate [224] → MLP Head → scalar PM2.5 prediction
-```
+**Plan vNext model:** XGBoost regressor over tabular features:
 
-**Key design choices:**
-- **HuberLoss (δ=10):** Robust to PM2.5 spike outliers
-- **Time-based splitting:** Train (before Oct 2022), Val (Oct 2022 – Jan 2023), Test (Feb 2023+) — no temporal leakage
-- **Per-city KNN imputation (k=5):** MCAR missing data handled within each city group
-- **Forward-fill for MNAR:** Structured sensor failures during pollution spikes
+- In-city lag/rolling features (PM2.5, AQI)
+- Calendar/seasonality features
+- Explicit cross-city neighbor features (`neighbor_*_pm2_5_lag1`, `neighbor_*_wind_lag1`)
+
+The old GNN/LSTM fusion model was retired.
 
 ---
 
@@ -191,22 +194,14 @@ This project uses the **WAQI (World Air Quality Index)** API for real-time data.
 
 The model uses lag/rolling features (e.g., `pm2_5_lag2`, `pm2_5_roll7mean`).
 
-To keep these features *time-consistent* during live inference, each run of `src/06_live_ingest.py` appends today's live readings into:
-
-- `data/live/live_history.json`
-
-Then `src/07_predict_live.py`:
-
-1. **Prefers** the most recent 7 entries from `data/live/live_history.json` for each city's lag window.
-2. **Falls back** to `models/city_last7.json` only until you have collected 7 live observations.
-
-This avoids mixing a 2026 “current” reading with lag windows computed from the tail of the historical (2023) dataset.
+In plan-vNext, inference uses `models/city_last7.json` (saved during training) to build lag/rolling
+features, plus the current live batch to compute cross-city neighbor features.
 
 ---
 
 ## 🔬 XAI Outputs
 
-After running `05_explain.py`, the following artifacts are generated in `outputs/`:
+After running `04_explain.py`, the following artifacts are generated in `outputs/`:
 
 1. **`shap_summary.png`** — SHAP beeswarm plot (all features ranked by importance)
 2. **`shap_waterfall_1..3.png`** — Detailed SHAP for top 3 PM2.5 spike events
@@ -235,7 +230,7 @@ All managed via `uv` (see `pyproject.toml`):
 | pandas | 2.2.2 | Data manipulation |
 | numpy | 1.26.4 | Numerical computing |
 | scikit-learn | 1.4.2 | KNN imputation, RF baseline, metrics |
-| torch | 2.3.0 | GNN + LSTM model |
+| xgboost | 2.0.3 | XGBoost regressor |
 | shap | 0.45.1 | Explainability |
 | matplotlib | 3.8.4 | Plotting |
 | seaborn | 0.13.2 | Statistical visualization |
@@ -266,10 +261,10 @@ cat .env
 
 ### Training is slow
 - The model uses CPU by default. Training ~100 epochs on CPU takes ~5–15 minutes depending on your machine.
-- If you have a CUDA GPU, PyTorch will auto-detect it.
+- (Optional) If you have a CUDA GPU, XGBoost may use it if configured; this repo defaults to CPU.
 
 ### SHAP takes too long
-- `05_explain.py` subsamples to 500 test points for speed. Adjust `max_samples` in the script if needed.
+- `04_explain.py` subsamples the evaluation set for speed. Adjust the `max_samples` constant in the script if needed.
 
 ### Streamlit won't start
 ```bash

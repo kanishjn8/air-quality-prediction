@@ -1,12 +1,16 @@
-"""
-Step 05 — Explainability
-Input:  models/best_model.pt, models/baseline_rf.pkl, data/processed/features.parquet
-Output: outputs/shap_summary.png, outputs/shap_waterfall_*.png,
-        outputs/gnn_edge_importance.png, outputs/temporal_lag_importance.png
+"""DEPRECATED (legacy): explainability for torch-era pipeline.
 
-Generates SHAP explanations for the Random Forest baseline, GNN edge
-importance heatmap, and temporal lag attribution analysis.
+Use:
+    - src/04_explain.py
+
+Legacy source archived at:
+    - legacy/src_torch/05_explain.py
 """
+
+raise SystemExit(
+        "src/05_explain.py is deprecated. Use src/04_explain.py (Plan vNext SHAP)."
+)
+
 
 import os
 import random

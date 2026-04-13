@@ -1,16 +1,19 @@
-"""
-Step 04 — Model Training
-Input:  data/processed/features.parquet, data/processed/graph_edges.csv
-Output: models/best_model.pt, outputs/training_curves.png, outputs/predictions.csv
+"""DEPRECATED (legacy): torch-based model training.
 
-Architecture: 3-branch fusion model
-  - GNN branch (GraphSAGE, 2 layers) → city embedding
-  - Temporal branch (LSTM, 2 layers) → sequence embedding
-  - Met branch (MLP) → meteorological embedding
-  - Fusion MLP head → scalar PM2.5 prediction
+This file is kept as a stub to avoid breaking older links, but the project has
+migrated to **Plan vNext** (XGBoost).
 
-Also trains a Random Forest baseline for comparison.
+Use:
+    - src/03_train.py
+
+Legacy source archived at:
+    - legacy/src_torch/04_train.py
 """
+
+raise SystemExit(
+        "src/04_train.py is deprecated. Use src/03_train.py (Plan vNext XGBoost)."
+)
+
 
 import os
 import sys

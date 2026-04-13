@@ -47,5 +47,3 @@ uv.lock
 # Misc
 .pytest_cache/
 *.log
-
-plan.md

@@ -1,11 +1,16 @@
-"""
-Step 06 — Live Data Ingestion
-Fetches current air quality readings from the WAQI API for 5 Indian cities
-and saves them to data/live/latest_reading.json.
+"""DEPRECATED (legacy): live ingest.
 
-Usage:
-    uv run python src/06_live_ingest.py
+Use:
+    - src/05_live_ingest.py
+
+Legacy source archived at:
+    - legacy/src_torch/06_live_ingest.py
 """
+
+raise SystemExit(
+        "src/06_live_ingest.py is deprecated. Use src/05_live_ingest.py (Plan vNext)."
+)
+
 
 import os
 import json

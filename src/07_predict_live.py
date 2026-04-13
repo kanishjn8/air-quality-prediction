@@ -1,17 +1,16 @@
-"""
-Step 07 — Live Prediction
-Input:  data/live/latest_reading.json, models/best_model.pt,
-    models/feature_scaler.pkl, models/temporal_scaler.pkl,
-    models/feature_columns.json, models/city_last7.json,
-    data/processed/adj_matrix.npy
-Output: Predicted next-day PM2.5 for each city (printed + saved to outputs/)
+"""DEPRECATED (legacy): torch-based live prediction.
 
-Builds feature vectors from live readings, handles missing fields via
-imputation, and runs the trained model for inference.
+Use:
+    - src/06_predict_live.py
 
-This follows plan.md Option A: inference reconstructs lag/rolling features
-from a saved per-city last-7 window (no need to load features.parquet).
+Legacy source archived at:
+    - legacy/src_torch/07_predict_live.py
 """
+
+raise SystemExit(
+        "src/07_predict_live.py is deprecated. Use src/06_predict_live.py (Plan vNext)."
+)
+
 
 import os
 import sys

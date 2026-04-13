@@ -109,7 +109,7 @@ def load_live_readings():
 
 def load_live_predictions():
     """Load live predictions from JSON."""
-    path = "outputs/live_predictions.json"
+    path = "data/live/predictions.json"
     if os.path.exists(path):
         with open(path) as f:
             return json.load(f)
@@ -127,7 +127,7 @@ with st.sidebar:
         with st.spinner("Fetching live data from WAQI API..."):
             try:
                 result = subprocess.run(
-                    [sys.executable, "src/06_live_ingest.py"],
+                        [sys.executable, "src/05_live_ingest.py"],
                     capture_output=True, text=True, timeout=30,
                 )
                 if result.returncode == 0:
@@ -141,7 +141,7 @@ with st.sidebar:
         with st.spinner("Running model inference..."):
             try:
                 result = subprocess.run(
-                    [sys.executable, "src/07_predict_live.py"],
+                        [sys.executable, "src/06_predict_live.py"],
                     capture_output=True, text=True, timeout=30,
                 )
                 if result.returncode == 0:
@@ -153,7 +153,7 @@ with st.sidebar:
 
     st.markdown("---")
 
-    cities = ["Delhi", "Bengaluru", "Kolkata", "Hyderabad"]
+    cities = ["Delhi", "Mumbai", "Bengaluru", "Kolkata", "Hyderabad"]
     selected_cities = st.multiselect(
         "🏙️ Select Cities",
         cities,
@@ -179,7 +179,7 @@ with st.sidebar:
     st.markdown("---")
     st.markdown(
         "<div style='text-align:center; color:#7f8c8d; font-size:0.85rem;'>"
-        "AirMind v1.0<br>GNN + LSTM + MLP Fusion</div>",
+        "AirMind vNext<br>XGBoost + cross-city features</div>",
         unsafe_allow_html=True,
     )
 
@@ -190,7 +190,7 @@ with st.sidebar:
 st.markdown('<p class="main-header">🌫️ AirMind</p>', unsafe_allow_html=True)
 st.markdown(
     '<p class="sub-header">Next-Day PM2.5 Forecast for Indian Cities — '
-    'Powered by Spatiotemporal GNN + LSTM</p>',
+    'Powered by XGBoost + cross-city features</p>',
     unsafe_allow_html=True,
 )
 
@@ -224,7 +224,9 @@ with tab1:
             col = cols[i % len(cols)]
             with col:
                 reading = readings.get(city)
-                pred_val = (predictions or {}).get("predictions", {}).get(city)
+                pred_val = None
+                if predictions:
+                    pred_val = (predictions.get("predictions") or {}).get(city)
 
                 if reading is None:
                     st.error(f"**{city}** — Data unavailable")

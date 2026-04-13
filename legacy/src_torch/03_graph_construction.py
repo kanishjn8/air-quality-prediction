@@ -1,24 +1,31 @@
-"""DEPRECATED (legacy): Graph construction.
+"""Archived legacy script.
 
-This file is kept as a stub to avoid breaking older links, but the project has
-migrated to **Plan vNext** (XGBoost + explicit cross-city features).
+Original path:
+  - src/03_graph_construction.py
 
-Use:
-    - src/02_feature_engineering.py
-    - src/03_train.py
-    - src/04_explain.py
-    - src/05_live_ingest.py
-    - src/06_predict_live.py
+This was part of the earlier (pre-Plan vNext) GNN/adjacency pipeline.
+Use the Plan vNext pipeline in `src/` instead.
 
-Legacy source archived at:
-    - legacy/src_torch/03_graph_construction.py
+---
+
 """
 
-raise SystemExit(
-        "src/03_graph_construction.py is deprecated. "
-        "Use Plan vNext pipeline scripts in src/ (02..06)."
-)
+# Original contents (verbatim) below
 
+"""
+Step 03 — Graph Construction
+Input:  data/processed/features.parquet
+Output: data/processed/graph_edges.csv, data/processed/adj_matrix.npy
+
+Builds a static spatial graph where nodes are cities and edges encode
+spatial (haversine distance) + pollutant correlation dependencies.
+"""
+
+import os
+import math
+import numpy as np
+import pandas as pd
+from scipy.stats import spearmanr
 
 # ────────────────────────────────────────────────────────────────
 # Paths
