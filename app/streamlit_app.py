@@ -153,7 +153,7 @@ with st.sidebar:
 
     st.markdown("---")
 
-    cities = ["Delhi", "Mumbai", "Bengaluru", "Kolkata", "Hyderabad"]
+    cities = ["Delhi", "Bengaluru", "Kolkata", "Hyderabad"]
     selected_cities = st.multiselect(
         "🏙️ Select Cities",
         cities,
@@ -279,11 +279,12 @@ with tab2:
         preds_df = pd.read_csv("outputs/predictions.csv")
 
         for city in selected_cities:
-            city_preds = preds_df[preds_df["city"] == city]
+            city_preds = preds_df[preds_df["city"] == city].copy()
             if city_preds.empty:
                 continue
 
             st.markdown(f"#### {city}")
+            city_preds = city_preds.sort_values("date").reset_index(drop=True)
 
             fig, ax = plt.subplots(figsize=(10, 3.5))
             ax.plot(city_preds.index, city_preds["actual_pm2_5"],
@@ -300,19 +301,20 @@ with tab2:
             st.pyplot(fig)
             plt.close()
 
-        # Overall metrics
+        # Per-city metrics
         st.markdown("---")
-        st.markdown("#### Test Set Metrics")
-        if os.path.exists("outputs/city_metrics.csv"):
-            metrics_df = pd.read_csv("outputs/city_metrics.csv")
+        st.markdown("#### Per-City Test Metrics")
+        if os.path.exists("outputs/per_city_metrics.csv"):
+            metrics_df = pd.read_csv("outputs/per_city_metrics.csv")
             st.dataframe(metrics_df, use_container_width=True, hide_index=True)
 
+        # Model comparison
         if os.path.exists("outputs/model_comparison.csv"):
-            st.markdown("#### Model Comparison")
+            st.markdown("#### Model Comparison (XGBoost vs RF Baseline)")
             comp_df = pd.read_csv("outputs/model_comparison.csv")
             st.dataframe(comp_df, use_container_width=True, hide_index=True)
     else:
-        st.info("No prediction data found. Run the training pipeline first.")
+        st.info("No prediction data found. Run the training pipeline first (`02 → 03`).")
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -322,7 +324,7 @@ with tab3:
     st.subheader("Model Explainability (XAI)")
 
     xai_tab1, xai_tab2, xai_tab3, xai_tab4 = st.tabs([
-        "SHAP Summary", "City Influence", "Spike Events", "Temporal Lags",
+        "SHAP Summary", "Cross-City Influence", "Spike Events", "Temporal Lags",
     ])
 
     with xai_tab1:
@@ -330,34 +332,40 @@ with tab3:
         if os.path.exists("outputs/shap_summary.png"):
             st_image("outputs/shap_summary.png", use_container_width=True)
         else:
-            st.info("Run `05_explain.py` to generate SHAP plots.")
-
-        if os.path.exists("outputs/shap_dependence.png"):
-            st.markdown("#### SHAP Dependence: PM2.5 Lag-1 × Wind Speed")
-            st_image("outputs/shap_dependence.png", use_container_width=True)
+            st.info("Run `04_explain.py` to generate SHAP plots.")
 
     with xai_tab2:
         st.markdown("#### Cross-City PM2.5 Influence Matrix")
-        if os.path.exists("outputs/gnn_edge_importance.png"):
-            st_image("outputs/gnn_edge_importance.png", use_container_width=True)
+        st.markdown(
+            "Each cell shows the mean |SHAP value| of the neighbor's lagged PM2.5 "
+            "feature when predicting the target city. Higher values mean stronger influence."
+        )
+        if os.path.exists("outputs/cross_city_influence.png"):
+            st_image("outputs/cross_city_influence.png", use_container_width=True)
         else:
-            st.info("Run `05_explain.py` to generate the influence heatmap.")
+            st.info("Run `04_explain.py` to generate the influence heatmap.")
 
     with xai_tab3:
         st.markdown("#### SHAP Waterfall for Top PM2.5 Spike Events")
+        found_any = False
         for i in range(1, 4):
-            path = f"outputs/shap_waterfall_{i}.png"
+            path = f"outputs/shap_waterfall_spike{i}.png"
             if os.path.exists(path):
                 st_image(path, caption=f"Spike Event #{i}", use_container_width=True)
-        if not any(os.path.exists(f"outputs/shap_waterfall_{i}.png") for i in range(1, 4)):
-            st.info("Run `05_explain.py` to generate waterfall plots.")
+                found_any = True
+        if not found_any:
+            st.info("Run `04_explain.py` to generate waterfall plots.")
 
     with xai_tab4:
         st.markdown("#### Temporal Lag Importance")
-        if os.path.exists("outputs/temporal_lag_importance.png"):
-            st_image("outputs/temporal_lag_importance.png", use_container_width=True)
+        st.markdown(
+            "Shows how much each PM2.5 lag feature (1, 2, 3, 7 days back) "
+            "contributes to the model's predictions on average."
+        )
+        if os.path.exists("outputs/lag_importance.png"):
+            st_image("outputs/lag_importance.png", use_container_width=True)
         else:
-            st.info("Run `05_explain.py` to generate lag importance chart.")
+            st.info("Run `04_explain.py` to generate lag importance chart.")
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -372,72 +380,103 @@ with tab4:
         st.markdown("#### Architecture")
         st.markdown("""
         ```
-        AirMind Fusion Model
-        ═══════════════════════════
+        AirMind — XGBoost + Cross-City Features
+        ═══════════════════════════════════════
 
-        ┌─────────────────────┐
-        │  GNN Branch         │
-        │  GraphSAGE-style    │
-        │  2 conv layers      │
-        │  16 → 64 → 64      │
-        │  + Adjacency matrix │
-        └──────────┬──────────┘
-                   │ 64
-        ┌──────────┴──────────┐
-        │  Temporal Branch    │
-        │  2-layer LSTM       │
-        │  hidden = 128       │
-        │  7-day sequence     │
-        └──────────┬──────────┘
-                   │ 128
-        ┌──────────┴──────────┐
-        │  Met Branch (MLP)   │
-        │  8 → 32 → 32       │
-        │  Calendar + weather │
-        └──────────┬──────────┘
-                   │ 32
-        ┌──────────┴──────────┐
-        │  Fusion MLP Head    │
-        │  224 → 64 → 1      │
-        │  Huber Loss (δ=10)  │
-        └─────────────────────┘
+        ┌───────────────────────────┐
+        │  Raw Pollutant Features   │
+        │  aqi, co, no, no2, o3,   │
+        │  so2, pm2_5, pm10, nh3   │
+        └───────────┬───────────────┘
+                    │
+        ┌───────────┴───────────────┐
+        │  Temporal Lag Features    │
+        │  pm2_5/aqi lag 1,2,3,7   │
+        │  rolling mean/std 3,7    │
+        └───────────┬───────────────┘
+                    │
+        ┌───────────┴───────────────┐
+        │  Cross-City Features      │
+        │  neighbor_*_pm2_5_lag1    │
+        │  neighbor_*_wind_lag1     │
+        │  (distance-weighted)      │
+        └───────────┬───────────────┘
+                    │
+        ┌───────────┴───────────────┐
+        │  Calendar + Meteorology   │
+        │  dayofweek, month,        │
+        │  season flags, temp,      │
+        │  wind, rainfall, pressure │
+        └───────────┬───────────────┘
+                    │
+        ┌───────────┴───────────────┐
+        │  XGBoost Regressor        │
+        │  2000 gradient-boosted    │
+        │  trees (depth 8)          │
+        │  log1p → predict → expm1  │
+        │  → PM2.5 (next day)       │
+        └───────────────────────────┘
         ```
         """)
 
     with col2:
-        st.markdown("#### Training Configuration")
+        st.markdown("#### XGBoost Hyperparameters")
         st.markdown("""
         | Parameter | Value |
         |-----------|-------|
-        | Optimizer | AdamW |
-        | Learning Rate | 1e-3 |
-        | Weight Decay | 1e-4 |
-        | Batch Size | 64 |
-        | Max Epochs | 100 |
-        | Early Stopping | Patience 15 |
-        | Gradient Clipping | max_norm=1.0 |
-        | Loss | HuberLoss (δ=10) |
-        | LR Scheduler | ReduceLROnPlateau |
-        | Seed | 42 |
+        | n_estimators | 2000 |
+        | learning_rate | 0.03 |
+        | max_depth | 8 |
+        | min_child_weight | 3 |
+        | subsample | 0.8 |
+        | colsample_bytree | 0.7 |
+        | gamma | 0.1 |
+        | reg_alpha (L1) | 0.05 |
+        | reg_lambda (L2) | 0.5 |
+        | objective | reg:squarederror |
+        | target transform | log1p(PM2.5) |
+        | seed | 42 |
+        """)
+
+        st.markdown("#### RF Baseline")
+        st.markdown("""
+        | Parameter | Value |
+        |-----------|-------|
+        | n_estimators | 300 |
+        | max_depth | 12 |
+        | target transform | log1p(PM2.5) |
+        | Features | No cross-city |
         """)
 
     st.markdown("---")
-    st.markdown("#### Training Curves")
-    if os.path.exists("outputs/training_curves.png"):
-        st_image("outputs/training_curves.png", use_container_width=True)
-    else:
-        st.info("Training curves will appear after running `04_train.py`.")
+
+    # Feature columns info
+    if os.path.exists("models/feature_columns.json"):
+        with open("models/feature_columns.json") as f:
+            feat_cols = json.load(f)
+        neighbor_count = sum(1 for c in feat_cols if c.startswith("neighbor_"))
+        core_count = len(feat_cols) - neighbor_count
+        st.markdown(f"#### Feature Summary: **{len(feat_cols)} total** ({core_count} core + {neighbor_count} cross-city)")
 
     st.markdown("---")
     st.markdown("#### Data Provenance")
-    st.markdown("""
+
+    # Read date range from features if available
+    date_info = "2020–2023"
+    if os.path.exists("data/processed/features.parquet"):
+        feat_df = pd.read_parquet("data/processed/features.parquet", columns=["date", "split"])
+        date_info = f"{feat_df['date'].min().date()} to {feat_df['date'].max().date()}"
+        split_counts = feat_df["split"].value_counts().to_dict()
+        split_str = " / ".join(f"{k}: {v}" for k, v in sorted(split_counts.items()))
+        st.markdown(f"**Split sizes:** {split_str}")
+
+    st.markdown(f"""
     | Source | Details |
     |--------|---------|
-    | **Historical Data** | `merged.csv` — 5 Indian cities, 2020–2024 |
+    | **Historical Data** | `merged.csv` — 5 Indian cities |
+    | **Date Range** | {date_info} |
     | **Cities** | Delhi, Bengaluru, Kolkata, Hyderabad |
-    | **Features** | 14 raw + 16 engineered = 30 total features |
     | **Target** | Next-day PM2.5 (shifted by -1 day) |
     | **Live API** | WAQI (World Air Quality Index) |
-    | **Train/Val/Test** | Before Oct 2022 / Oct 2022–Jan 2023 / Feb 2023 onwards |
-    | **Research Gaps** | Cross-city dependencies (GNN), missing data bias (MCAR/MNAR) |
+    | **Research Gaps** | Cross-city dependencies (explicit spatial features), missing data bias (MCAR/MNAR) |
     """)

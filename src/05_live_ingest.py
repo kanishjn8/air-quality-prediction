@@ -23,8 +23,7 @@ from dotenv import load_dotenv
 
 CITY_SLUGS = {
     "Delhi": "delhi",
-    "Mumbai": "mumbai",
-    "Bengaluru": "bengaluru",
+    "Bengaluru": "bangalore",
     "Kolkata": "kolkata",
     "Hyderabad": "hyderabad",
 }

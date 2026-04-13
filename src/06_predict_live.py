@@ -39,12 +39,11 @@ SCALER_PATH = "models/feature_scaler.pkl"
 FEATURE_COLS_PATH = "models/feature_columns.json"
 CITY_LAST7_PATH = "models/city_last7.json"
 
-CITIES = ["Delhi", "Mumbai", "Bengaluru", "Kolkata", "Hyderabad"]
+CITIES = ["Delhi", "Bengaluru", "Kolkata", "Hyderabad"]
 CITY_TO_IDX = {c: i for i, c in enumerate(CITIES)}
 
 CITY_COORDS: dict[str, tuple[float, float]] = {
-    "Delhi": (28.6139, 77.2090),
-    "Mumbai": (19.0760, 72.8777),
+    "Delhi": (28.7041, 77.1025),
     "Bengaluru": (12.9716, 77.5946),
     "Kolkata": (22.5726, 88.3639),
     "Hyderabad": (17.3850, 78.4867),
@@ -137,11 +136,15 @@ def main() -> None:
         # Raw core fields
         row["aqi"] = _safe_float(reading.get("aqi")) or float(_rolling_mean(last7(city, "aqi")))
         row["co"] = _safe_float(reading.get("co")) or float(_rolling_mean(last7(city, "co")))
+        # 'no' is not in the WAQI API — default to historical mean from last7
+        row["no"] = _safe_float(reading.get("no")) or float(_rolling_mean(last7(city, "no")))
         row["no2"] = _safe_float(reading.get("no2")) or float(_rolling_mean(last7(city, "no2")))
         row["o3"] = _safe_float(reading.get("o3")) or float(_rolling_mean(last7(city, "o3")))
         row["so2"] = _safe_float(reading.get("so2")) or float(_rolling_mean(last7(city, "so2")))
         row["pm2_5"] = _safe_float(reading.get("pm2_5")) or float(_rolling_mean(last7(city, "pm2_5")))
         row["pm10"] = _safe_float(reading.get("pm10")) or float(_rolling_mean(last7(city, "pm10")))
+        # 'nh3' is not in the WAQI API — default to historical mean from last7
+        row["nh3"] = _safe_float(reading.get("nh3")) or float(_rolling_mean(last7(city, "nh3")))
         row["temperature"] = _safe_float(reading.get("temperature")) or float(_rolling_mean(last7(city, "temperature")))
         row["wind_speed"] = _safe_float(reading.get("wind_speed")) or float(_rolling_mean(last7(city, "wind_speed")))
         row["rainfall"] = _safe_float(reading.get("rainfall"))
@@ -205,11 +208,13 @@ def main() -> None:
     feat_df = feat_df[feature_cols].astype(float)
     X_scaled = scaler.transform(feat_df)
 
-    preds = model.predict(X_scaled)
+    # Model is trained on log1p(target) — back-transform with expm1
+    preds_log = model.predict(X_scaled)
+    preds = np.maximum(np.expm1(preds_log), 0.0)
 
     out = {
         "generated_at": pd.Timestamp.utcnow().isoformat(),
-        "predictions": {city: float(preds[i]) for i, city in enumerate(feat_df.index.tolist())},
+        "predictions": {city: round(float(preds[i]), 2) for i, city in enumerate(feat_df.index.tolist())},
     }
 
     with open(OUT_PATH, "w") as f:
@@ -219,7 +224,7 @@ def main() -> None:
     print("Step 06 — Live prediction complete")
     print("=" * 60)
     for city, val in out["predictions"].items():
-        print(f"  {city:<10s} {val:.2f}")
+        print(f"  {city:<10s} {val:.2f} µg/m³")
     print(f"\n✓ Saved: {OUT_PATH}")
 
 

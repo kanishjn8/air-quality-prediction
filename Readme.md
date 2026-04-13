@@ -17,7 +17,7 @@
 | Kolkata | 22.5726°N, 88.3639°E |
 | Hyderabad | 17.3850°N, 78.4867°E |
 
-> Note: The historical dataset includes 5 cities; live API reliability may vary per city.
+> Note: The historical dataset includes 5 cities; live API reliability may vary per city. Inferences are generated for 4 cities.
 
 ---
 
@@ -218,6 +218,7 @@ After running `04_explain.py`, the following artifacts are generated in `outputs
 - `pm2_5 < 1.0` treated as sensor failure → set to NaN and imputed
 - Date column may have mixed formats — parsed with `infer_datetime_format=True`
 - API's `pm25` key ≠ our `pm2_5` column — mapped carefully in Step 06
+- **Removing Mumbai from Inference:** Mumbai often fails to yield accurate next-day predictions due to its coastal geography. Rapid meteorological shifts (unpredictable sea breezes and humidity spikes) dictate its PM2.5 levels, which our 24-hour lag features cannot fully capture, leading to erratic real-time inference.
 
 ---
 

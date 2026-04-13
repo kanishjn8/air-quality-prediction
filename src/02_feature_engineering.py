@@ -98,11 +98,13 @@ def main() -> None:
     numeric_cols = [
         "aqi",
         "co",
+        "no",
         "no2",
         "o3",
         "so2",
         "pm2_5",
         "pm10",
+        "nh3",
         "temperature",
         "wind_speed",
         "rainfall",
@@ -182,10 +184,10 @@ def main() -> None:
     df["target_pm2_5"] = df.groupby("city")["pm2_5"].shift(-1)
     df = df.dropna(subset=["target_pm2_5"]).reset_index(drop=True)
 
-    # Time split (robust to this repo's historical data range)
-    # Use quantiles so we always have non-empty train/val/test.
-    q_val = df["date"].quantile(0.80)
-    q_test = df["date"].quantile(0.90)
+    # Time split — use 70/85 quantiles for broad seasonal coverage.
+    # 80/90 placed val entirely in winter (Nov-Feb) causing distribution mismatch.
+    q_val = df["date"].quantile(0.70)
+    q_test = df["date"].quantile(0.85)
     df["split"] = "train"
     df.loc[df["date"] >= q_val, "split"] = "val"
     df.loc[df["date"] >= q_test, "split"] = "test"
@@ -201,11 +203,13 @@ def main() -> None:
     core_feature_columns = [
         "aqi",
         "co",
+        "no",
         "no2",
         "o3",
         "so2",
         "pm2_5",
         "pm10",
+        "nh3",
         "temperature",
         "wind_speed",
         "rainfall",

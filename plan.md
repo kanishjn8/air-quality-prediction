@@ -118,7 +118,7 @@ uv run python src/02_feature_engineering.py
 | Column | Type | Notes |
 |--------|------|-------|
 | (index) | int | drop |
-| city | str | one of: `Delhi`, `Mumbai`, `Bengaluru`, `Kolkata`, `Hyderabad` |
+| city | str | one of: `Delhi`, `Bengaluru`, `Kolkata`, `Hyderabad` |
 | date | str→datetime | parse with `pd.to_datetime` |
 | aqi | float | Air Quality Index (composite) |
 | co | float | Carbon monoxide |
@@ -263,7 +263,7 @@ df["monsoon_season"]      = df["month"].isin([6, 7, 8, 9]).astype(int)
 For each city row, attach the previous day's PM2.5 from every other city, weighted by geospatial proximity. This encodes pollutant transport between cities explicitly as tabular features.
 
 ```python
-CITIES = ["Delhi", "Mumbai", "Bengaluru", "Kolkata", "Hyderabad"]
+CITIES = ["Delhi", "Bengaluru", "Kolkata", "Hyderabad"]
 CITY_TO_IDX = {c: i for i, c in enumerate(CITIES)}
 
 CITY_COORDS = {
@@ -532,7 +532,7 @@ for i, idx in enumerate(top3, 1):
 
 #### 4.3 Cross-city influence heatmap (5×5 SHAP-based)
 ```python
-CITIES = ["Delhi", "Mumbai", "Bengaluru", "Kolkata", "Hyderabad"]
+CITIES = ["Delhi", "Bengaluru", "Kolkata", "Hyderabad"]
 influence = np.zeros((5, 5))
 
 for i, target_city in enumerate(CITIES):
@@ -661,11 +661,10 @@ with open("models/city_last7.json") as f:
 with open("data/live/latest_reading.json") as f:
     live = json.load(f)
 
-CITIES    = ["Delhi", "Mumbai", "Bengaluru", "Kolkata", "Hyderabad"]
+CITIES    = ["Delhi", "Bengaluru", "Kolkata", "Hyderabad"]
 CITY_TO_IDX = {c: i for i, c in enumerate(CITIES)}
 CITY_COORDS = {
     "Delhi":     (28.6139, 77.2090),
-    "Mumbai":    (19.0760, 72.8777),
     "Bengaluru": (12.9716, 77.5946),
     "Kolkata":   (22.5726, 88.3639),
     "Hyderabad": (17.3850, 78.4867),
