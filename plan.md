@@ -263,7 +263,7 @@ df["monsoon_season"]      = df["month"].isin([6, 7, 8, 9]).astype(int)
 For each city row, attach the previous day's PM2.5 from every other city, weighted by geospatial proximity. This encodes pollutant transport between cities explicitly as tabular features.
 
 ```python
-CITIES = ["Delhi", "Bengaluru", "Kolkata", "Hyderabad"]
+CITIES = ["Delhi", "Mumbai", "Bengaluru", "Kolkata", "Hyderabad"]
 CITY_TO_IDX = {c: i for i, c in enumerate(CITIES)}
 
 CITY_COORDS = {
@@ -392,30 +392,81 @@ X_val,   y_val   = val[FEATURE_COLUMNS].values,   val["target_pm2_5"].values
 X_test,  y_test  = test[FEATURE_COLUMNS].values,  test["target_pm2_5"].values
 ```
 
-#### 3.2 Train XGBoost with early stopping
+#### 3.2 Train robust XGBoost (time-aware CV + recency weighting)
 ```python
+from sklearn.model_selection import TimeSeriesSplit, ParameterGrid
+
+# Use train+val only for tuning; test remains untouched.
+trainval = df[df["split"].isin(["train", "val"])].sort_values("date")
+X_tv = trainval[[f"{c}_scaled" for c in FEATURE_COLUMNS]].astype(float).values
+y_tv_raw = trainval["target_pm2_5"].astype(float).values
+y_tv = np.log1p(y_tv_raw)
+
+grid = ParameterGrid({
+    "max_depth": [4, 6],
+    "min_child_weight": [2, 4],
+    "subsample": [0.8],
+    "colsample_bytree": [0.7, 0.9],
+    "learning_rate": [0.03],
+    "n_estimators": [900],
+    "reg_alpha": [0.05],
+    "reg_lambda": [0.5],
+    "gamma": [0.0, 0.1],
+})
+
+def recency_weights(dates, min_w=0.6, max_w=1.6):
+    d = pd.to_datetime(dates)
+    scaled = (d - d.min()) / (d.max() - d.min())
+    return min_w + scaled.astype(float) * (max_w - min_w)
+
+best_params, best_mae = None, np.inf
+tscv = TimeSeriesSplit(n_splits=4)
+for params in grid:
+    fold_maes = []
+    for tr_idx, va_idx in tscv.split(X_tv):
+        X_tr, X_va = X_tv[tr_idx], X_tv[va_idx]
+        y_tr_raw, y_va_raw = y_tv_raw[tr_idx], y_tv_raw[va_idx]
+
+        # Outlier-robust training target per fold.
+        clip_hi = np.quantile(y_tr_raw, 0.995)
+        y_tr = np.log1p(np.clip(y_tr_raw, 0.0, clip_hi))
+        w_tr = recency_weights(trainval.iloc[tr_idx]["date"]).to_numpy()
+
+        model = xgb.XGBRegressor(
+            objective="reg:squarederror",
+            eval_metric="mae",
+            random_state=SEED,
+            n_jobs=-1,
+            **params
+        )
+        model.fit(X_tr, y_tr, sample_weight=w_tr, verbose=False)
+        preds = np.maximum(np.expm1(model.predict(X_va)), 0)
+        fold_maes.append(mean_absolute_error(y_va_raw, preds))
+
+    cv_mae = float(np.mean(fold_maes))
+    if cv_mae < best_mae:
+        best_mae, best_params = cv_mae, params
+
+# Final fit on full train+val with tuned params.
+clip_hi = np.quantile(y_tv_raw, 0.995)
+y_tv_clip = np.log1p(np.clip(y_tv_raw, 0.0, clip_hi))
+w_tv = recency_weights(trainval["date"]).to_numpy()
+
 model = xgb.XGBRegressor(
-    n_estimators=500,
-    max_depth=6,
-    learning_rate=0.05,
-    subsample=0.8,
-    colsample_bytree=0.8,
-    min_child_weight=5,
-    reg_alpha=0.1,
-    reg_lambda=1.0,
-    random_state=SEED,
-    early_stopping_rounds=30,
+    objective="reg:squarederror",
     eval_metric="mae",
+    random_state=SEED,
     n_jobs=-1,
+    **best_params
 )
-model.fit(X_train, y_train, eval_set=[(X_val, y_val)], verbose=50)
+model.fit(X_tv, y_tv_clip, sample_weight=w_tv, verbose=False)
 ```
 
 #### 3.3 Baseline — Random Forest without cross-city features
 ```python
 BASE_COLS = [c for c in FEATURE_COLUMNS if not c.startswith("neighbor_")]
 rf = RandomForestRegressor(n_estimators=200, max_depth=10,
-                            random_state=SEED, n_jobs=-1)
+                            random_state=SEED, n_jobs=1)
 rf.fit(train[BASE_COLS].values, y_train)
 rf_preds = rf.predict(test[BASE_COLS].values)
 ```
@@ -532,7 +583,7 @@ for i, idx in enumerate(top3, 1):
 
 #### 4.3 Cross-city influence heatmap (5×5 SHAP-based)
 ```python
-CITIES = ["Delhi", "Bengaluru", "Kolkata", "Hyderabad"]
+CITIES = ["Delhi", "Mumbai", "Bengaluru", "Kolkata", "Hyderabad"]
 influence = np.zeros((5, 5))
 
 for i, target_city in enumerate(CITIES):
@@ -858,7 +909,7 @@ np.random.seed(SEED)
 | XGBoost vs RF MAE improvement | > 5% | > 15% |
 | Per-city R² worst case | > 0.55 | > 0.70 |
 
-If thresholds not met: check for data leakage first (random split used? target scaled?). Then tune `max_depth` and `n_estimators` before changing the feature set.
+If thresholds not met: check for data leakage first (random split used? target scaled?). Then tune with time-aware CV using `max_depth`, `min_child_weight`, `reg_lambda`, and `gamma`, while keeping recency weighting and target clipping (99.5th percentile) enabled.
 
 ---
 
