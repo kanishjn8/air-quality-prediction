@@ -27,6 +27,7 @@ from dataclasses import dataclass
 import joblib
 import numpy as np
 import pandas as pd
+from sklearn.model_selection import ParameterGrid, TimeSeriesSplit
 from sklearn.ensemble import RandomForestRegressor
 from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score
 from xgboost import XGBRegressor
@@ -57,6 +58,79 @@ def _metrics(y_true: np.ndarray, y_pred: np.ndarray) -> Metrics:
     rmse = float(np.sqrt(mean_squared_error(y_true, y_pred)))
     r2 = float(r2_score(y_true, y_pred)) if len(y_true) > 1 else 0.0
     return Metrics(mae=mae, rmse=rmse, r2=r2)
+
+
+def _recency_weights(dates: pd.Series, min_w: float = 0.6, max_w: float = 1.6) -> np.ndarray:
+    """Return linear recency weights so recent samples matter more."""
+    dt = pd.to_datetime(dates, errors="coerce")
+    min_dt, max_dt = dt.min(), dt.max()
+    if pd.isna(min_dt) or pd.isna(max_dt) or min_dt == max_dt:
+        return np.ones(len(dates), dtype=float)
+    scaled = (dt - min_dt) / (max_dt - min_dt)
+    return (min_w + scaled.astype(float).to_numpy() * (max_w - min_w)).astype(float)
+
+
+def _tune_xgb_with_time_cv(
+    trainval_df: pd.DataFrame, scaled_cols: list[str], seed: int
+) -> dict:
+    """Time-aware tuning on train+val, keeping test untouched."""
+    ordered = trainval_df.sort_values("date").reset_index(drop=True)
+    X = ordered[scaled_cols].astype(float).to_numpy()
+    y_raw = ordered["target_pm2_5"].astype(float).to_numpy()
+    dates = pd.to_datetime(ordered["date"], errors="coerce")
+    y = np.log1p(y_raw)
+
+    tscv = TimeSeriesSplit(n_splits=4)
+    grid = ParameterGrid(
+        {
+            "max_depth": [8],
+            "min_child_weight": [4],
+            "subsample": [0.9],
+            "colsample_bytree": [0.8],
+            "learning_rate": [0.02],
+            "n_estimators": [1400],
+            "reg_alpha": [0.05],
+            "reg_lambda": [0.5],
+            "gamma": [0.1],
+        }
+    )
+
+    best = {"cv_mae": float("inf"), "params": None}
+    print("\nTime-series CV tuning (train+val only):")
+    for i, params in enumerate(grid, start=1):
+        fold_maes: list[float] = []
+        for tr_idx, va_idx in tscv.split(X):
+            X_tr, X_va = X[tr_idx], X[va_idx]
+            y_tr, y_va = y[tr_idx], y[va_idx]
+            y_va_raw = y_raw[va_idx]
+
+            # Clip only using fold-train distribution to reduce sensitivity to outlier spikes.
+            y_tr_raw = np.expm1(y_tr)
+            clip_hi = np.quantile(y_tr_raw, 0.995)
+            y_tr = np.log1p(np.clip(y_tr_raw, 0.0, clip_hi))
+
+            w_tr = _recency_weights(dates.iloc[tr_idx])
+            mdl = XGBRegressor(
+                objective="reg:squarederror",
+                eval_metric="mae",
+                random_state=seed,
+                n_jobs=-1,
+                **params,
+            )
+            mdl.fit(X_tr, y_tr, sample_weight=w_tr, verbose=False)
+            preds = np.maximum(np.expm1(mdl.predict(X_va)), 0.0)
+            fold_maes.append(float(mean_absolute_error(y_va_raw, preds)))
+
+        avg_mae = float(np.mean(fold_maes))
+        print(f"  Trial {i:02d}/{len(grid):02d}  CV MAE={avg_mae:7.2f}  params={params}")
+        if avg_mae < best["cv_mae"]:
+            best = {"cv_mae": avg_mae, "params": dict(params)}
+
+    if not best["params"]:
+        raise RuntimeError("XGBoost tuning failed to produce parameters")
+    print(f"\nBest CV MAE: {best['cv_mae']:.2f}")
+    print(f"Best params: {best['params']}")
+    return best
 
 
 def main() -> None:
@@ -90,14 +164,9 @@ def main() -> None:
 
     X_train = train_df[scaled_cols].astype(float)
     y_train_raw = train_df["target_pm2_5"].astype(float)
-    X_val = val_df[scaled_cols].astype(float)
-    y_val_raw = val_df["target_pm2_5"].astype(float)
     X_test = test_df[scaled_cols].astype(float)
     y_test = test_df["target_pm2_5"].astype(float)
-
-    # Log-transform targets (skewness: 3.2 → 0.2)
     y_train = np.log1p(y_train_raw)
-    y_val = np.log1p(y_val_raw)
 
     print("=" * 60)
     print("Step 03 — Train (XGBoost + RF Baseline)")
@@ -108,23 +177,23 @@ def main() -> None:
     # ═════════════════════════════════════════════════════════════
     # XGBoost with all features (including cross-city)
     # ═════════════════════════════════════════════════════════════
-    # Deep trees + high n_estimators: the model needs capacity to learn
-    # per-city patterns from a single global model using city_idx.
+    trainval_df = df[df["split"].isin(["train", "val"])].copy()
+    tuned = _tune_xgb_with_time_cv(trainval_df=trainval_df, scaled_cols=scaled_cols, seed=SEED)
+
+    X_trainval = trainval_df[scaled_cols].astype(float)
+    y_trainval_raw = trainval_df["target_pm2_5"].astype(float).to_numpy()
+    y_trainval_clip_hi = np.quantile(y_trainval_raw, 0.995)
+    y_trainval = np.log1p(np.clip(y_trainval_raw, 0.0, y_trainval_clip_hi))
+    w_trainval = _recency_weights(trainval_df["date"])
+
     model = XGBRegressor(
-        n_estimators=2000,
-        learning_rate=0.03,
-        max_depth=8,
-        min_child_weight=3,
-        subsample=0.8,
-        colsample_bytree=0.7,
-        gamma=0.1,
-        reg_alpha=0.05,
-        reg_lambda=0.5,
         objective="reg:squarederror",
+        eval_metric="mae",
         random_state=SEED,
         n_jobs=-1,
+        **tuned["params"],
     )
-    model.fit(X_train, y_train, verbose=False)
+    model.fit(X_trainval, y_trainval, sample_weight=w_trainval, verbose=False)
 
     joblib.dump(model, MODEL_PATH)
     print(f"\n✓ Saved model: {MODEL_PATH}")
@@ -139,7 +208,7 @@ def main() -> None:
         n_estimators=300,
         max_depth=12,
         random_state=SEED,
-        n_jobs=-1,
+        n_jobs=1,
     )
     rf.fit(train_df[base_scaled_cols].astype(float), y_train)
 

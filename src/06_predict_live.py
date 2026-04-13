@@ -39,11 +39,12 @@ SCALER_PATH = "models/feature_scaler.pkl"
 FEATURE_COLS_PATH = "models/feature_columns.json"
 CITY_LAST7_PATH = "models/city_last7.json"
 
-CITIES = ["Delhi", "Bengaluru", "Kolkata", "Hyderabad"]
+CITIES = ["Delhi", "Mumbai", "Bengaluru", "Kolkata", "Hyderabad"]
 CITY_TO_IDX = {c: i for i, c in enumerate(CITIES)}
 
 CITY_COORDS: dict[str, tuple[float, float]] = {
-    "Delhi": (28.7041, 77.1025),
+    "Delhi": (28.6139, 77.2090),
+    "Mumbai": (19.0760, 72.8777),
     "Bengaluru": (12.9716, 77.5946),
     "Kolkata": (22.5726, 88.3639),
     "Hyderabad": (17.3850, 78.4867),

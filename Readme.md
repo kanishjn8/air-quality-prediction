@@ -13,11 +13,12 @@
 | City | Coordinates |
 |------|-------------|
 | Delhi | 28.6139°N, 77.2090°E |
+| Mumbai | 19.0760°N, 72.8777°E |
 | Bengaluru | 12.9716°N, 77.5946°E |
 | Kolkata | 22.5726°N, 88.3639°E |
 | Hyderabad | 17.3850°N, 78.4867°E |
 
-> Note: The historical dataset includes 5 cities; live API reliability may vary per city. Inferences are generated for 4 cities.
+> Note: Both training and live inference run on all 5 cities.
 
 ---
 
@@ -47,12 +48,11 @@ airmind/
 │   └── city_last7.json                 # last-7 per-city raw rows saved by 03_train.py (inference)
 ├── outputs/
 │   ├── shap_summary.png                # SHAP feature importance
-│   ├── gnn_edge_importance.png         # cross-city influence heatmap
-│   ├── temporal_lag_importance.png      # lag day attribution
-│   ├── training_curves.png             # loss + MAE curves
+│   ├── cross_city_influence.png        # cross-city influence heatmap
+│   ├── lag_importance.png              # lag day attribution
 │   ├── predictions.csv                 # test set predictions
-│   ├── city_metrics.csv                # per-city evaluation
-│   └── model_comparison.csv            # GNN vs RF comparison
+│   ├── per_city_metrics.csv            # per-city evaluation
+│   └── model_comparison.csv            # XGBoost vs RF comparison
 ├── app/
 │   └── streamlit_app.py                # interactive dashboard
 ├── notebooks/
@@ -166,7 +166,14 @@ The dashboard will open at **http://localhost:8501** with 4 tabs:
 - Calendar/seasonality features
 - Explicit cross-city neighbor features (`neighbor_*_pm2_5_lag1`, `neighbor_*_wind_lag1`)
 
-The old GNN/LSTM fusion model was retired.
+### Training strategy (performance-focused, ML-only)
+
+- `log1p(target_pm2_5)` training target to stabilize heavy right-skew
+- Time-series cross-validation (`TimeSeriesSplit`) on train+val to tune XGBoost hyperparameters
+- Stable XGBoost objective: `reg:squarederror` with outlier-robust target clipping
+- Recency sample weighting so newer periods influence the model more than older periods
+- Fold-wise target clipping at 99.5th percentile during tuning to avoid overfitting rare outliers
+- Final model fit on combined train+val with tuned params; test split remains untouched
 
 ---
 
@@ -176,7 +183,7 @@ The old GNN/LSTM fusion model was retired.
 |--------|---------|--------|
 | Test MAE | < 20 µg/m³ | < 10 µg/m³ |
 | Test R² | > 0.65 | > 0.80 |
-| GNN vs RF MAE improvement | > 5% | > 15% |
+| XGBoost vs RF MAE improvement | > 5% | > 15% |
 | Per-city R² (worst) | > 0.55 | > 0.70 |
 
 ---
@@ -204,10 +211,9 @@ features, plus the current live batch to compute cross-city neighbor features.
 After running `04_explain.py`, the following artifacts are generated in `outputs/`:
 
 1. **`shap_summary.png`** — SHAP beeswarm plot (all features ranked by importance)
-2. **`shap_waterfall_1..3.png`** — Detailed SHAP for top 3 PM2.5 spike events
-3. **`shap_dependence.png`** — pm2_5_lag1 × wind_speed interaction
-4. **`gnn_edge_importance.png`** — cross-city influence heatmap
-5. **`temporal_lag_importance.png`** — Which lag days matter most (high pollution vs normal)
+2. **`shap_waterfall_spike1.png`** to **`shap_waterfall_spike3.png`** — Top 3 PM2.5 spike event explanations
+3. **`cross_city_influence.png`** — 5x5 cross-city influence heatmap
+4. **`lag_importance.png`** — Lag feature contribution chart
 
 ---
 
@@ -218,7 +224,7 @@ After running `04_explain.py`, the following artifacts are generated in `outputs
 - `pm2_5 < 1.0` treated as sensor failure → set to NaN and imputed
 - Date column may have mixed formats — parsed with `infer_datetime_format=True`
 - API's `pm25` key ≠ our `pm2_5` column — mapped carefully in Step 06
-- **Removing Mumbai from Inference:** Mumbai often fails to yield accurate next-day predictions due to its coastal geography. Rapid meteorological shifts (unpredictable sea breezes and humidity spikes) dictate its PM2.5 levels, which our 24-hour lag features cannot fully capture, leading to erratic real-time inference.
+- Mumbai remains in the production city set for both training and inference to keep the feature graph and deployment schema consistent.
 
 ---
 
