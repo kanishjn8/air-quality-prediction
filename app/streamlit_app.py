@@ -10,6 +10,8 @@ import inspect
 import sys
 import json
 import subprocess
+from pathlib import Path
+from typing import Optional, Dict, Any, List
 
 import streamlit as st
 import pandas as pd
@@ -268,10 +270,11 @@ div[data-baseweb="tab-border"] { display: none !important; }
 # ────────────────────────────────────────────────────────────────
 # Helpers
 # ────────────────────────────────────────────────────────────────
-CITIES = ["Delhi", "Bengaluru", "Kolkata", "Hyderabad"]
+CITIES = ["Delhi", "Mumbai", "Bengaluru", "Kolkata", "Hyderabad"]
 
 CITY_ACCENT = {
     "Delhi":     "#ef4444",
+    "Mumbai":    "#f59e0b",
     "Bengaluru": "#22c55e",
     "Kolkata":   "#a855f7",
     "Hyderabad": "#38bdf8",
@@ -304,6 +307,100 @@ def load_live_predictions():
         with open(path) as f:
             return json.load(f)
     return None
+
+
+def _safe_float(v):
+    try:
+        if v is None:
+            return None
+        return float(v)
+    except (TypeError, ValueError):
+        return None
+
+
+def _discover_output_images(outputs_dir: str = "outputs") -> List[str]:
+    root = Path(outputs_dir)
+    if not root.exists():
+        return []
+    return sorted([str(p) for p in root.glob("*.png")])
+
+
+def _load_predictions_csv(path: str = "outputs/predictions.csv") -> Optional[pd.DataFrame]:
+    if not os.path.exists(path):
+        return None
+    try:
+        df = pd.read_csv(path)
+    except Exception:
+        return None
+    if "date" in df.columns:
+        df["date"] = pd.to_datetime(df["date"], errors="coerce")
+    return df
+
+
+def _compute_metrics(df: pd.DataFrame) -> Optional[pd.DataFrame]:
+    """Compute metrics from a predictions dataframe.
+
+    Expected columns: city, actual_pm2_5, predicted_pm2_5 (date optional)
+    """
+    required = {"city", "actual_pm2_5", "predicted_pm2_5"}
+    if df is None or df.empty or not required.issubset(df.columns):
+        return None
+
+    rows = []
+    for city, g in df.groupby("city"):
+        y = g["actual_pm2_5"].astype(float).to_numpy()
+        p = g["predicted_pm2_5"].astype(float).to_numpy()
+        if len(y) < 2:
+            continue
+        err = p - y
+        mae = float(np.mean(np.abs(err)))
+        rmse = float(np.sqrt(np.mean(err**2)))
+        denom = float(np.sum((y - float(np.mean(y))) ** 2))
+        r2 = float(1.0 - (np.sum(err**2) / denom)) if denom > 0 else 0.0
+        mape = float(np.mean(np.abs(err) / np.maximum(np.abs(y), 1e-6)) * 100.0)
+        rows.append({"city": city, "MAE": mae, "RMSE": rmse, "R2": r2, "MAPE_%": mape, "n": int(len(y))})
+
+    m = pd.DataFrame(rows).sort_values("R2", ascending=False)
+    if not m.empty:
+        # Global row
+        y = df["actual_pm2_5"].astype(float).to_numpy()
+        p = df["predicted_pm2_5"].astype(float).to_numpy()
+        err = p - y
+        mae = float(np.mean(np.abs(err)))
+        rmse = float(np.sqrt(np.mean(err**2)))
+        denom = float(np.sum((y - float(np.mean(y))) ** 2))
+        r2 = float(1.0 - (np.sum(err**2) / denom)) if denom > 0 else 0.0
+        mape = float(np.mean(np.abs(err) / np.maximum(np.abs(y), 1e-6)) * 100.0)
+        m = pd.concat(
+            [pd.DataFrame([{"city": "__overall__", "MAE": mae, "RMSE": rmse, "R2": r2, "MAPE_%": mape, "n": int(len(y))}]), m],
+            ignore_index=True,
+        )
+    return m
+
+
+def _error_by_bins(df: pd.DataFrame, n_bins: int = 8) -> Optional[pd.DataFrame]:
+    required = {"actual_pm2_5", "predicted_pm2_5"}
+    if df is None or df.empty or not required.issubset(df.columns):
+        return None
+
+    tmp = df.copy()
+    tmp["actual_pm2_5"] = tmp["actual_pm2_5"].astype(float)
+    tmp["predicted_pm2_5"] = tmp["predicted_pm2_5"].astype(float)
+    tmp = tmp.replace([np.inf, -np.inf], np.nan).dropna(subset=["actual_pm2_5", "predicted_pm2_5"])
+    if tmp.empty:
+        return None
+
+    tmp["abs_err"] = np.abs(tmp["predicted_pm2_5"] - tmp["actual_pm2_5"])
+    try:
+        tmp["bin"] = pd.qcut(tmp["actual_pm2_5"], q=n_bins, duplicates="drop")
+    except Exception:
+        return None
+
+    out = (
+        tmp.groupby("bin", as_index=False)
+        .agg(n=("abs_err", "size"), mean_abs_err=("abs_err", "mean"), median_abs_err=("abs_err", "median"))
+    )
+    return out
 
 
 # ────────────────────────────────────────────────────────────────
@@ -373,6 +470,30 @@ with tab1:
     if readings is None:
         st.info("No live data yet. Click **Refresh Data** to fetch current readings.")
     else:
+        # Snapshot table (quick 'current' + 'tomorrow' view)
+        snap_rows = []
+        for city in CITIES:
+            r = (readings or {}).get(city) or {}
+            p = ((predictions or {}).get("predictions") or {}).get(city) if predictions else None
+            snap_rows.append(
+                {
+                    "city": city,
+                    "current_pm2_5": _safe_float(r.get("pm2_5")),
+                    "tomorrow_pm2_5": _safe_float(p),
+                    "aqi": _safe_float(r.get("aqi")),
+                    "temp_c": _safe_float(r.get("temperature")),
+                    "wind_mps": _safe_float(r.get("wind_speed")),
+                }
+            )
+        snap_df = pd.DataFrame(snap_rows)
+        st.markdown(
+            '<p class="section-header" style="margin-top:0.25rem;">Current snapshot</p>',
+            unsafe_allow_html=True,
+        )
+        st.dataframe(snap_df, use_container_width=True, hide_index=True)
+        if predictions is None:
+            st.caption("Forecast not run yet. Click **Run Forecast** to generate tomorrow's PM2.5.")
+
         cols = st.columns(2, gap="medium")
 
         for i, city in enumerate(CITIES):
@@ -437,8 +558,8 @@ with tab1:
 # Tab 2: Historical
 # ═══════════════════════════════════════════════════════════════
 with tab2:
-    if os.path.exists("outputs/predictions.csv"):
-        preds_df = pd.read_csv("outputs/predictions.csv")
+    preds_df = _load_predictions_csv("outputs/predictions.csv")
+    if preds_df is not None and not preds_df.empty:
 
         st.markdown('<p class="section-header">Actual vs Predicted</p>',
                     unsafe_allow_html=True)
@@ -457,50 +578,202 @@ with tab2:
             "grid.alpha": 0.8,
         })
 
-        for city in CITIES:
-            city_preds = preds_df[preds_df["city"] == city].copy()
-            if city_preds.empty:
-                continue
+        available_cities = (
+            sorted([c for c in preds_df["city"].dropna().unique().tolist()])
+            if "city" in preds_df.columns
+            else []
+        )
+        if not available_cities:
+            st.warning("`outputs/predictions.csv` exists, but it doesn't have a `city` column.")
+        else:
+            f1, f2, f3 = st.columns([2, 2, 3])
+            with f1:
+                selected_cities = st.multiselect(
+                    "Cities",
+                    options=available_cities,
+                    default=[c for c in CITIES if c in available_cities] or available_cities,
+                )
+            with f2:
+                max_points = st.number_input(
+                    "Max points per city",
+                    min_value=50,
+                    max_value=5000,
+                    value=600,
+                    step=50,
+                )
+            with f3:
+                date_range = None
+                if "date" in preds_df.columns and preds_df["date"].notna().any():
+                    dmin = preds_df["date"].min().date()
+                    dmax = preds_df["date"].max().date()
+                    date_range = st.date_input("Date range", value=(dmin, dmax))
 
-            city_preds = city_preds.sort_values("date").reset_index(drop=True)
-            accent = CITY_ACCENT.get(city, "#71717a")
+            plot_df = preds_df.copy()
+            if selected_cities:
+                plot_df = plot_df[plot_df["city"].isin(selected_cities)].copy()
+            if (
+                date_range
+                and isinstance(date_range, (list, tuple))
+                and len(date_range) == 2
+                and "date" in plot_df.columns
+            ):
+                start_d, end_d = date_range
+                start_ts = pd.Timestamp(start_d)
+                end_ts = pd.Timestamp(end_d) + pd.Timedelta(days=1) - pd.Timedelta(microseconds=1)
+                plot_df = plot_df[(plot_df["date"] >= start_ts) & (plot_df["date"] <= end_ts)].copy()
 
-            fig, ax = plt.subplots(figsize=(12, 3))
-            ax.plot(city_preds.index, city_preds["actual_pm2_5"],
-                    label="Actual", alpha=0.8, color="#71717a", linewidth=1.2)
-            ax.plot(city_preds.index, city_preds["predicted_pm2_5"],
-                    label="Predicted", alpha=0.9, color=accent, linewidth=1.5,
-                    linestyle="--")
-            ax.fill_between(city_preds.index,
-                            city_preds["actual_pm2_5"],
-                            city_preds["predicted_pm2_5"],
-                            alpha=0.06, color=accent)
-            ax.set_ylabel("PM2.5", fontsize=8)
-            ax.legend(loc="upper right", fontsize=7, framealpha=0.2)
-            ax.grid(True)
-            ax.set_title(city, fontsize=11, fontweight="bold",
-                         color="#ffffff", pad=10)
-            ax.spines["top"].set_visible(False)
-            ax.spines["right"].set_visible(False)
-            fig.tight_layout()
-            st.pyplot(fig)
-            plt.close()
+            required_cols = {"city", "actual_pm2_5", "predicted_pm2_5"}
+            missing = [c for c in required_cols if c not in plot_df.columns]
+            if missing:
+                st.warning(f"Missing columns in predictions file: {missing}")
+            else:
+                for city in selected_cities:
+                    city_preds = plot_df[plot_df["city"] == city].copy()
+                    if city_preds.empty:
+                        continue
+
+                    if "date" in city_preds.columns and city_preds["date"].notna().any():
+                        city_preds = city_preds.sort_values("date")
+                        x = city_preds["date"]
+                        x_label = "Date"
+                    else:
+                        city_preds = city_preds.reset_index(drop=True)
+                        x = city_preds.index
+                        x_label = "Index"
+
+                    if max_points and len(city_preds) > int(max_points):
+                        city_preds = city_preds.tail(int(max_points)).copy()
+                        if isinstance(x, pd.Series):
+                            x = x.tail(int(max_points))
+                        else:
+                            x = range(len(city_preds))
+
+                    accent = CITY_ACCENT.get(city, "#71717a")
+
+                    fig, ax = plt.subplots(figsize=(12, 3))
+                    ax.plot(
+                        x,
+                        city_preds["actual_pm2_5"],
+                        label="Actual",
+                        alpha=0.8,
+                        color="#71717a",
+                        linewidth=1.2,
+                    )
+                    ax.plot(
+                        x,
+                        city_preds["predicted_pm2_5"],
+                        label="Predicted",
+                        alpha=0.9,
+                        color=accent,
+                        linewidth=1.5,
+                        linestyle="--",
+                    )
+                    try:
+                        ax.fill_between(
+                            x,
+                            city_preds["actual_pm2_5"].to_numpy(),
+                            city_preds["predicted_pm2_5"].to_numpy(),
+                            alpha=0.06,
+                            color=accent,
+                        )
+                    except Exception:
+                        pass
+                    ax.set_ylabel("PM2.5", fontsize=8)
+                    ax.set_xlabel(x_label, fontsize=8)
+                    ax.legend(loc="upper right", fontsize=7, framealpha=0.2)
+                    ax.grid(True)
+                    ax.set_title(city, fontsize=11, fontweight="bold",
+                                 color="#ffffff", pad=10)
+                    ax.spines["top"].set_visible(False)
+                    ax.spines["right"].set_visible(False)
+                    fig.tight_layout()
+                    st.pyplot(fig)
+                    plt.close()
 
         st.markdown("---")
 
-        m1, m2 = st.columns(2)
-        with m1:
-            st.markdown('<p class="section-header" style="font-size:1.1rem;">Per-City Metrics</p>',
-                        unsafe_allow_html=True)
+        with st.expander("Preview historical predictions data", expanded=False):
+            st.dataframe(preds_df.head(200), use_container_width=True, hide_index=True)
+
+        # Metrics + diagnostics
+        st.markdown('<p class="section-header" style="font-size:1.1rem;">Metrics</p>',
+                    unsafe_allow_html=True)
+
+        cm1, cm2 = st.columns([2, 1])
+        with cm1:
+            # Prefer training-produced metrics when present; otherwise compute directly.
             if os.path.exists("outputs/per_city_metrics.csv"):
-                st.dataframe(pd.read_csv("outputs/per_city_metrics.csv"),
-                             use_container_width=True, hide_index=True)
-        with m2:
-            st.markdown('<p class="section-header" style="font-size:1.1rem;">Model Comparison</p>',
-                        unsafe_allow_html=True)
+                mdf = pd.read_csv("outputs/per_city_metrics.csv")
+            else:
+                mdf = _compute_metrics(preds_df)
+
+            if mdf is not None and not mdf.empty:
+                st.dataframe(mdf, use_container_width=True, hide_index=True)
+            else:
+                st.info("Metrics not available.")
+
+        with cm2:
             if os.path.exists("outputs/model_comparison.csv"):
+                st.markdown('<p class="section-header" style="font-size:1.1rem;">Model Comparison</p>',
+                            unsafe_allow_html=True)
                 st.dataframe(pd.read_csv("outputs/model_comparison.csv"),
                              use_container_width=True, hide_index=True)
+
+        st.markdown('<p class="section-header" style="font-size:1.1rem; margin-top:1.25rem;">Diagnostics</p>',
+                    unsafe_allow_html=True)
+
+        d1, d2 = st.columns(2)
+        with d1:
+            st.caption("How well predictions track the 45° line (all cities)")
+            if {"actual_pm2_5", "predicted_pm2_5"}.issubset(preds_df.columns):
+                tmp = preds_df[["actual_pm2_5", "predicted_pm2_5"]].copy().dropna()
+                tmp = tmp.replace([np.inf, -np.inf], np.nan).dropna()
+                if len(tmp) > 2:
+                    fig, ax = plt.subplots(figsize=(5.5, 4.5))
+                    ax.scatter(tmp["actual_pm2_5"], tmp["predicted_pm2_5"], s=8, alpha=0.15, color="#a1a1aa")
+                    mn = float(np.nanmin(tmp[["actual_pm2_5", "predicted_pm2_5"]].to_numpy()))
+                    mx = float(np.nanmax(tmp[["actual_pm2_5", "predicted_pm2_5"]].to_numpy()))
+                    ax.plot([mn, mx], [mn, mx], linestyle="--", linewidth=1.2, color="#22c55e", alpha=0.8)
+                    ax.set_xlabel("Actual")
+                    ax.set_ylabel("Predicted")
+                    ax.grid(True)
+                    ax.set_title("Actual vs Predicted")
+                    fig.tight_layout()
+                    st.pyplot(fig)
+                    plt.close()
+
+        with d2:
+            st.caption("Residual distribution (all cities)")
+            if {"actual_pm2_5", "predicted_pm2_5"}.issubset(preds_df.columns):
+                tmp = preds_df[["actual_pm2_5", "predicted_pm2_5"]].copy().dropna()
+                tmp = tmp.replace([np.inf, -np.inf], np.nan).dropna()
+                if len(tmp) > 2:
+                    res = (tmp["predicted_pm2_5"] - tmp["actual_pm2_5"]).astype(float).to_numpy()
+                    fig, ax = plt.subplots(figsize=(5.5, 4.5))
+                    ax.hist(res, bins=60, color="#38bdf8", alpha=0.55)
+                    ax.axvline(0, color="#e5e7eb", linewidth=1)
+                    ax.set_xlabel("Residual (Pred - Actual)")
+                    ax.set_ylabel("Count")
+                    ax.grid(True)
+                    ax.set_title("Residuals")
+                    fig.tight_layout()
+                    st.pyplot(fig)
+                    plt.close()
+
+        st.caption("Error by actual PM2.5 quantile (higher bars = model struggles more)")
+        bin_df = _error_by_bins(preds_df)
+        if bin_df is not None and not bin_df.empty:
+            fig, ax = plt.subplots(figsize=(12, 3.5))
+            x = np.arange(len(bin_df))
+            ax.bar(x, bin_df["mean_abs_err"], color="#f59e0b", alpha=0.65)
+            ax.set_xticks(x)
+            ax.set_xticklabels([str(b) for b in bin_df["bin"].tolist()], rotation=15, ha="right", fontsize=8)
+            ax.set_ylabel("Mean |Error|")
+            ax.grid(True, axis="y")
+            ax.set_title("Mean absolute error by PM2.5 bin")
+            fig.tight_layout()
+            st.pyplot(fig)
+            plt.close()
     else:
         st.info("No prediction data. Run training pipeline first.")
 
@@ -518,35 +791,51 @@ with tab3:
         "Feature Importance", "Cross-City Influence", "Spike Events", "Lag Analysis",
     ])
 
+    all_pngs = _discover_output_images("outputs")
+    png_by_name = {Path(p).name: p for p in all_pngs}
+
     with x1:
-        if os.path.exists("outputs/shap_summary.png"):
-            st_image("outputs/shap_summary.png", use_container_width=True)
+        path = png_by_name.get("shap_summary.png")
+        if path and os.path.exists(path):
+            st_image(path, use_container_width=True)
         else:
-            st.info("Run 04_explain.py to generate SHAP plots.")
+            st.info("No SHAP summary plot found yet. Run `src/04_explain.py`.")
+
+        extras = [p for p in all_pngs if "shap_" in Path(p).name and p != path]
+        if extras:
+            with st.expander("Other SHAP plots", expanded=False):
+                for p in extras:
+                    st_image(p, caption=Path(p).name, use_container_width=True)
 
     with x2:
         st.caption(
             "Mean |SHAP| of neighbor PM2.5 lag features. "
             "Higher values indicate stronger cross-city influence."
         )
-        if os.path.exists("outputs/cross_city_influence.png"):
-            st_image("outputs/cross_city_influence.png", use_container_width=True)
+        path = png_by_name.get("cross_city_influence.png")
+        if path and os.path.exists(path):
+            st_image(path, use_container_width=True)
         else:
             st.info("Run 04_explain.py to generate heatmap.")
 
     with x3:
-        found = False
-        for i in range(1, 4):
-            path = f"outputs/shap_waterfall_spike{i}.png"
-            if os.path.exists(path):
-                st_image(path, caption=f"Spike Event {i}", use_container_width=True)
-                found = True
-        if not found:
-            st.info("Run 04_explain.py to generate waterfall plots.")
+        spike_paths = [p for p in all_pngs if "shap_waterfall_spike" in Path(p).name]
+        if spike_paths:
+            for p in spike_paths:
+                st_image(p, caption=Path(p).stem, use_container_width=True)
+        else:
+            st.info("No spike waterfall plots found yet. Run `src/04_explain.py`.")
 
     with x4:
         st.caption("PM2.5 lag feature contributions — 1, 2, 3, 7 days back.")
-        if os.path.exists("outputs/lag_importance.png"):
-            st_image("outputs/lag_importance.png", use_container_width=True)
+        path = png_by_name.get("lag_importance.png")
+        if path and os.path.exists(path):
+            st_image(path, use_container_width=True)
         else:
             st.info("Run 04_explain.py to generate lag chart.")
+
+        lag_like = [p for p in all_pngs if "lag" in Path(p).name.lower() and p != path]
+        if lag_like:
+            with st.expander("Other lag-related plots", expanded=False):
+                for p in lag_like:
+                    st_image(p, caption=Path(p).name, use_container_width=True)

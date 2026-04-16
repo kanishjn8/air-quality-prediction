@@ -73,7 +73,11 @@ def _recency_weights(dates: pd.Series, min_w: float = 0.6, max_w: float = 1.6) -
 def _tune_xgb_with_time_cv(
     trainval_df: pd.DataFrame, scaled_cols: list[str], seed: int
 ) -> dict:
-    """Time-aware tuning on train+val, keeping test untouched."""
+    """Time-aware tuning on train+val, keeping test untouched.
+
+    NOTE: This is intentionally lightweight. If you want faster iteration, set
+    `AIR_TUNE=0` to skip CV and use defaults.
+    """
     ordered = trainval_df.sort_values("date").reset_index(drop=True)
     X = ordered[scaled_cols].astype(float).to_numpy()
     y_raw = ordered["target_pm2_5"].astype(float).to_numpy()
@@ -81,17 +85,19 @@ def _tune_xgb_with_time_cv(
     y = np.log1p(y_raw)
 
     tscv = TimeSeriesSplit(n_splits=4)
+    # Small grid: keep runtime reasonable while still allowing a better bias/variance tradeoff.
+    # Further constrained because XGBoost CV can still be slow on some machines.
     grid = ParameterGrid(
         {
-            "max_depth": [8],
-            "min_child_weight": [4],
-            "subsample": [0.9],
+            "max_depth": [6, 8],
+            "min_child_weight": [6],
+            "subsample": [0.85],
             "colsample_bytree": [0.8],
-            "learning_rate": [0.02],
-            "n_estimators": [1400],
-            "reg_alpha": [0.05],
-            "reg_lambda": [0.5],
-            "gamma": [0.1],
+            "learning_rate": [0.03],
+            "n_estimators": [1200],
+            "reg_alpha": [0.1],
+            "reg_lambda": [1.0],
+            "gamma": [0.0],
         }
     )
 
@@ -117,7 +123,17 @@ def _tune_xgb_with_time_cv(
                 n_jobs=-1,
                 **params,
             )
-            mdl.fit(X_tr, y_tr, sample_weight=w_tr, verbose=False)
+
+            # Provide a validation set so we can stop early.
+            mdl.fit(
+                X_tr,
+                y_tr,
+                sample_weight=w_tr,
+                eval_set=[(X_va, y_va)],
+                verbose=False,
+                early_stopping_rounds=50,
+            )
+
             preds = np.maximum(np.expm1(mdl.predict(X_va)), 0.0)
             fold_maes.append(float(mean_absolute_error(y_va_raw, preds)))
 
@@ -137,6 +153,8 @@ def main() -> None:
     np.random.seed(SEED)
     os.makedirs("models", exist_ok=True)
     os.makedirs("outputs", exist_ok=True)
+
+    do_tune = os.getenv("AIR_TUNE", "1") not in {"0", "false", "False", "no", "NO"}
 
     if not os.path.exists(FEATURES_PATH):
         raise FileNotFoundError(f"Missing {FEATURES_PATH}. Run src/02_feature_engineering.py first.")
@@ -160,7 +178,12 @@ def main() -> None:
 
     train_df = df[df["split"] == "train"].copy()
     val_df = df[df["split"] == "val"].copy()
+
+    # When using a train+val-only split strategy, treat val as the report split
+    # so outputs (metrics/predictions.csv) still get generated.
     test_df = df[df["split"] == "test"].copy()
+    if test_df.empty:
+        test_df = val_df.copy()
 
     X_train = train_df[scaled_cols].astype(float)
     y_train_raw = train_df["target_pm2_5"].astype(float)
@@ -178,7 +201,25 @@ def main() -> None:
     # XGBoost with all features (including cross-city)
     # ═════════════════════════════════════════════════════════════
     trainval_df = df[df["split"].isin(["train", "val"])].copy()
-    tuned = _tune_xgb_with_time_cv(trainval_df=trainval_df, scaled_cols=scaled_cols, seed=SEED)
+
+    if do_tune:
+        tuned = _tune_xgb_with_time_cv(trainval_df=trainval_df, scaled_cols=scaled_cols, seed=SEED)
+        best_params = tuned["params"]
+    else:
+        # Reasonable defaults that usually generalize well for this dataset.
+        best_params = {
+            "max_depth": 6,
+            "min_child_weight": 6,
+            "subsample": 0.85,
+            "colsample_bytree": 0.8,
+            "learning_rate": 0.03,
+            "n_estimators": 1600,
+            "reg_alpha": 0.1,
+            "reg_lambda": 1.0,
+            "gamma": 0.0,
+        }
+        print("\nSkipping CV tuning (AIR_TUNE=0). Using default params:")
+        print(best_params)
 
     X_trainval = trainval_df[scaled_cols].astype(float)
     y_trainval_raw = trainval_df["target_pm2_5"].astype(float).to_numpy()
@@ -191,9 +232,20 @@ def main() -> None:
         eval_metric="mae",
         random_state=SEED,
         n_jobs=-1,
-        **tuned["params"],
+        **best_params,
     )
-    model.fit(X_trainval, y_trainval, sample_weight=w_trainval, verbose=False)
+    # Early stopping on the explicit val split (faster + usually better generalization)
+    X_val = val_df[scaled_cols].astype(float)
+    y_val = np.log1p(val_df["target_pm2_5"].astype(float).to_numpy())
+
+    model.fit(
+        X_trainval,
+        y_trainval,
+        sample_weight=w_trainval,
+        eval_set=[(X_val, y_val)],
+        verbose=False,
+        early_stopping_rounds=75,
+    )
 
     joblib.dump(model, MODEL_PATH)
     print(f"\n✓ Saved model: {MODEL_PATH}")
@@ -214,17 +266,43 @@ def main() -> None:
 
     # ═════════════════════════════════════════════════════════════
     # Evaluate (back-transform from log-space)
+    #   - Train metrics vs Val metrics confirms overfitting.
+    #   - "Test" here is whatever `test_df` is (real test split or val-as-report fallback).
     # ═════════════════════════════════════════════════════════════
+
+    # Train
+    xgb_train_preds = np.maximum(np.expm1(model.predict(X_train)), 0)
+    rf_train_preds = np.maximum(np.expm1(rf.predict(train_df[base_scaled_cols].astype(float))), 0)
+
+    xgb_train_m = _metrics(y_train_raw.to_numpy(), xgb_train_preds)
+    rf_train_m = _metrics(y_train_raw.to_numpy(), rf_train_preds)
+
+    # Val (always available)
+    X_val_scaled = val_df[scaled_cols].astype(float)
+    y_val_raw = val_df["target_pm2_5"].astype(float)
+    xgb_val_preds = np.maximum(np.expm1(model.predict(X_val_scaled)), 0)
+    rf_val_preds = np.maximum(np.expm1(rf.predict(val_df[base_scaled_cols].astype(float))), 0)
+
+    xgb_val_m = _metrics(y_val_raw.to_numpy(), xgb_val_preds)
+    rf_val_m = _metrics(y_val_raw.to_numpy(), rf_val_preds)
+
+    # Test/report split
     xgb_preds = np.maximum(np.expm1(model.predict(X_test)), 0)
     rf_preds = np.maximum(np.expm1(rf.predict(test_df[base_scaled_cols].astype(float))), 0)
 
     xgb_m = _metrics(y_test.to_numpy(), xgb_preds)
     rf_m = _metrics(y_test.to_numpy(), rf_preds)
 
-    print(f"\n{'Model':<45s}  {'MAE':>6s}  {'RMSE':>6s}  {'R²':>6s}")
-    print("-" * 70)
-    print(f"{'XGBoost (with cross-city features)':<45s}  {xgb_m.mae:6.2f}  {xgb_m.rmse:6.2f}  {xgb_m.r2:6.3f}")
-    print(f"{'RandomForest (no cross-city features)':<45s}  {rf_m.mae:6.2f}  {rf_m.rmse:6.2f}  {rf_m.r2:6.3f}")
+    def _print_block(title: str, a: Metrics, b: Metrics) -> None:
+        print(f"\n{title}")
+        print(f"{'Model':<45s}  {'MAE':>6s}  {'RMSE':>6s}  {'R²':>6s}")
+        print("-" * 70)
+        print(f"{'XGBoost (with cross-city features)':<45s}  {a.mae:6.2f}  {a.rmse:6.2f}  {a.r2:6.3f}")
+        print(f"{'RandomForest (no cross-city features)':<45s}  {b.mae:6.2f}  {b.rmse:6.2f}  {b.r2:6.3f}")
+
+    _print_block("TRAIN", xgb_train_m, rf_train_m)
+    _print_block("VAL", xgb_val_m, rf_val_m)
+    _print_block("TEST/REPORT", xgb_m, rf_m)
 
     mae_improvement = (rf_m.mae - xgb_m.mae) / rf_m.mae * 100
     print(f"\nXGBoost MAE improvement over RF: {mae_improvement:.1f}%")

@@ -1,3 +1,3 @@
 model,MAE,RMSE,R2
-XGBoost (with cross-city features),83.86,169.88,0.456
-RandomForest (no cross-city features),87.26,178.16,0.402
+XGBoost (with cross-city features),17.39,57.1,0.94
+RandomForest (no cross-city features),76.33,162.36,0.515

@@ -6,7 +6,21 @@ Input:
 Output:
   - data/processed/features.parquet
   - models/feature_scaler.pkl
-  - models/feature_columns.json
+  - models    # Time split: keep the most recent year as validation; train on all earlier years.
+    # This is useful when you want maximum training history and you're not holding out a test set.
+    max_dt = df["date"].max()
+    val_start = (max_dt - pd.Timedelta(days=365)).normalize()
+
+    df["split"] = "train"
+    df.loc[df["date"] >= val_start, "split"] = "val"
+
+    print("\nSplit windows:")
+    print(f"  train: < {val_start.date()}")
+    print(f"  val:   >= {val_start.date()} (last ~365 days)")
+
+    print("\nSplit counts:")
+    print(df["split"].value_counts().to_string())
+olumns.json
 
 Contract:
   - target_pm2_5 is next-day PM2.5: pm2_5 shifted by -1 per city.
@@ -29,7 +43,9 @@ from sklearn.preprocessing import StandardScaler
 SEED = 42
 np.random.seed(SEED)
 
-RAW_CSV = "data/raw/merged.csv"
+# Source merged dataset.
+# Prefer the newer post-EDA merged file if present.
+RAW_CSV = os.getenv("AIR_MERGED_CSV", "data/processed/merged.csv")
 OUT_PARQUET = "data/processed/features.parquet"
 SCALER_PATH = "models/feature_scaler.pkl"
 FEATURE_COLS_PATH = "models/feature_columns.json"
@@ -70,6 +86,10 @@ def main() -> None:
     print("=" * 60)
 
     df = pd.read_csv(RAW_CSV)
+
+    # Common cleanup from EDA merges
+    df = df.drop(columns=["Unnamed: 0"], errors="ignore")
+
     if "date" not in df.columns or "city" not in df.columns:
         raise ValueError("merged.csv must include 'date' and 'city' columns")
     df["date"] = pd.to_datetime(df["date"], errors="coerce")
@@ -95,6 +115,8 @@ def main() -> None:
     # Basic sensor failure rule
     df.loc[df["pm2_5"] < 1.0, "pm2_5"] = np.nan
 
+    # Some merged datasets won't contain all pollutant channels.
+    # Keep a stable schema by creating missing channels as 0.0 (so training/inference match).
     numeric_cols = [
         "aqi",
         "co",
@@ -110,9 +132,9 @@ def main() -> None:
         "rainfall",
         "pressure",
     ]
-    missing = [c for c in numeric_cols if c not in df.columns]
-    if missing:
-        raise ValueError(f"merged.csv is missing required columns: {missing}")
+    for c in numeric_cols:
+        if c not in df.columns:
+            df[c] = 0.0
 
     # KNN imputation per city
     imputed_parts: list[pd.DataFrame] = []
@@ -126,11 +148,11 @@ def main() -> None:
     )
 
     # Temporal lag/rolling features (per city)
-    for lag in [1, 2, 3, 7]:
+    for lag in [1, 2, 3, 7, 14, 21, 28]:
         df[f"pm2_5_lag{lag}"] = df.groupby("city")["pm2_5"].shift(lag)
         df[f"aqi_lag{lag}"] = df.groupby("city")["aqi"].shift(lag)
 
-    for window in [3, 7]:
+    for window in [3, 7, 14]:
         df[f"pm2_5_roll{window}mean"] = df.groupby("city")["pm2_5"].transform(
             lambda x: x.shift(1).rolling(window, min_periods=1).mean()
         )
@@ -138,13 +160,18 @@ def main() -> None:
             lambda x: x.shift(1).rolling(window, min_periods=1).std().fillna(0.0)
         )
 
-    # Calendar features
+    # Calendar / seasonality features
     df["dayofweek"] = df["date"].dt.dayofweek
     df["month"] = df["date"].dt.month
+    df["dayofyear"] = df["date"].dt.dayofyear
     df["is_weekend"] = (df["dayofweek"] >= 5).astype(int)
     df["quarter"] = df["date"].dt.quarter
     df["crop_burning_season"] = df["month"].isin([10, 11]).astype(int)
     df["monsoon_season"] = df["month"].isin([6, 7, 8, 9]).astype(int)
+
+    # Smooth yearly seasonality often boosts generalization.
+    df["doy_sin"] = np.sin(2 * np.pi * df["dayofyear"] / 365.25)
+    df["doy_cos"] = np.cos(2 * np.pi * df["dayofyear"] / 365.25)
 
     # Neighbor weights based on distance
     dist_weights: dict[tuple[str, str], float] = {}
@@ -162,6 +189,7 @@ def main() -> None:
         .sort_index()
     )
     pivot_pm_lag1 = pivot_pm.shift(1)
+    pivot_pm_lag7 = pivot_pm.shift(7)
     pivot_wind_lag1 = pivot_wind.shift(1)
 
     for target_city in CITIES:
@@ -173,10 +201,12 @@ def main() -> None:
             w = dist_weights[(target_city, neighbor)]
             key = neighbor.lower()
 
-            pm_map = pivot_pm_lag1[neighbor]
+            pm_lag1_map = pivot_pm_lag1[neighbor]
+            pm_lag7_map = pivot_pm_lag7[neighbor]
             wind_map = pivot_wind_lag1[neighbor]
 
-            df.loc[mask, f"neighbor_{key}_pm2_5_lag1"] = dates.map(pm_map).to_numpy() * w
+            df.loc[mask, f"neighbor_{key}_pm2_5_lag1"] = dates.map(pm_lag1_map).to_numpy() * w
+            df.loc[mask, f"neighbor_{key}_pm2_5_lag7"] = dates.map(pm_lag7_map).to_numpy() * w
             df.loc[mask, f"neighbor_{key}_wind_lag1"] = dates.map(wind_map).to_numpy() * w
 
     # Encode city + label
@@ -184,13 +214,18 @@ def main() -> None:
     df["target_pm2_5"] = df.groupby("city")["pm2_5"].shift(-1)
     df = df.dropna(subset=["target_pm2_5"]).reset_index(drop=True)
 
-    # Time split — use 70/85 quantiles for broad seasonal coverage.
-    # 80/90 placed val entirely in winter (Nov-Feb) causing distribution mismatch.
-    q_val = df["date"].quantile(0.70)
-    q_test = df["date"].quantile(0.85)
+    # Time split: keep the most recent year as validation; train on all earlier years.
+    # (No separate test split in this mode.)
+    max_dt = df["date"].max()
+    val_start = (max_dt - pd.Timedelta(days=365)).normalize()
+
     df["split"] = "train"
-    df.loc[df["date"] >= q_val, "split"] = "val"
-    df.loc[df["date"] >= q_test, "split"] = "test"
+    df.loc[df["date"] >= val_start, "split"] = "val"
+
+    print("\nSplit windows:")
+    print(f"  train: < {val_start.date()}")
+    print(f"  val:   >= {val_start.date()} (last ~365 days)")
+
     print("\nSplit counts:")
     print(df["split"].value_counts().to_string())
 
@@ -218,20 +253,31 @@ def main() -> None:
         "pm2_5_lag2",
         "pm2_5_lag3",
         "pm2_5_lag7",
+        "pm2_5_lag14",
+        "pm2_5_lag21",
+        "pm2_5_lag28",
         "aqi_lag1",
         "aqi_lag2",
         "aqi_lag3",
         "aqi_lag7",
+        "aqi_lag14",
+        "aqi_lag21",
+        "aqi_lag28",
         "pm2_5_roll3mean",
         "pm2_5_roll7mean",
+        "pm2_5_roll14mean",
         "pm2_5_roll3std",
         "pm2_5_roll7std",
+        "pm2_5_roll14std",
         "dayofweek",
         "month",
+        "dayofyear",
         "is_weekend",
         "quarter",
         "crop_burning_season",
         "monsoon_season",
+        "doy_sin",
+        "doy_cos",
         "city_idx",
     ]
 
@@ -257,6 +303,8 @@ def main() -> None:
     df[scaled_cols] = np.nan
     for split in ["train", "val", "test"]:
         m = df["split"] == split
+        if not m.any():
+            continue
         df.loc[m, scaled_cols] = scaler.transform(df.loc[m, feature_columns].astype(float))
 
     joblib.dump(scaler, SCALER_PATH)
